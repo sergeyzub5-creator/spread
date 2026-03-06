@@ -38,6 +38,7 @@ class RuntimeTestTab(QWidget):
         self._ui_state_timer = QTimer(self)
         self._ui_state_timer.setInterval(50)
         self._ui_state_timer.timeout.connect(self._flush_pending_state)
+        self._transport_mock_controls: list[dict[str, object]] = []
         self._build_ui()
         self.apply_theme()
         self.retranslate_ui()
@@ -72,6 +73,8 @@ class RuntimeTestTab(QWidget):
         self.exchange_select = QComboBox()
         self.exchange_select.setObjectName("runtimeSelect")
         self.exchange_select.currentIndexChanged.connect(self._on_exchange_changed)
+        self.route_select = QComboBox()
+        self.route_select.setObjectName("runtimeSelect")
         self.market_type_capsule = QLabel()
         self.market_type_capsule.setObjectName("runtimeCapsule")
         self.symbol_input = QLineEdit()
@@ -79,9 +82,36 @@ class RuntimeTestTab(QWidget):
         self.symbol_input.textEdited.connect(self._on_symbol_edited)
         self.symbol_input.returnPressed.connect(self._hide_completer)
         selector_row.addWidget(self.exchange_select, 0)
+        selector_row.addWidget(self.route_select, 0)
         selector_row.addWidget(self.market_type_capsule, 0)
         selector_row.addWidget(self.symbol_input, 1)
         hero_layout.addLayout(selector_row)
+
+        transport_mock = QWidget()
+        transport_mock.setObjectName("runtimeTransportMock")
+        transport_mock_layout = QHBoxLayout(transport_mock)
+        transport_mock_layout.setContentsMargins(0, 2, 0, 0)
+        transport_mock_layout.setSpacing(18)
+        transport_mock_layout.addWidget(
+            self._build_transport_side_mock(
+                active_route="WS",
+                inactive_route="REST",
+                inactive_reason="REST для Binance пока не подключен",
+                active_kind="primary",
+            ),
+            0,
+        )
+        transport_mock_layout.addWidget(
+            self._build_transport_side_mock(
+                active_route="REST",
+                inactive_route="WS",
+                inactive_reason="WS для Bitget требует аккаунт UTA",
+                active_kind="warning",
+            ),
+            0,
+        )
+        transport_mock_layout.addStretch(1)
+        hero_layout.addWidget(transport_mock)
 
         controls_row = QHBoxLayout()
         controls_row.setSpacing(8)
@@ -158,6 +188,71 @@ class RuntimeTestTab(QWidget):
         self.symbol_input.setCompleter(self._symbol_completer)
         self._update_running_state(False)
 
+    def _build_transport_side_mock(
+        self,
+        *,
+        active_route: str,
+        inactive_route: str,
+        inactive_reason: str,
+        active_kind: str,
+    ) -> QWidget:
+        frame = QWidget()
+        frame.setObjectName("runtimeMockSide")
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        segmented = QFrame()
+        segmented.setObjectName("runtimeMockSegment")
+        segmented_layout = QHBoxLayout(segmented)
+        segmented_layout.setContentsMargins(0, 0, 0, 0)
+        segmented_layout.setSpacing(8)
+
+        active_button = QPushButton(active_route)
+        active_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        active_button.setProperty("mockRole", "active")
+        active_button.setFixedHeight(20)
+        active_button.setMinimumWidth(0)
+        active_dot = QLabel("•")
+        active_dot.setObjectName("runtimeMockRouteDot")
+        active_dot.setProperty("mockDotState", "active")
+        inactive_button = QPushButton(inactive_route)
+        inactive_button.setProperty("mockRole", "inactive")
+        inactive_button.setToolTip(inactive_reason)
+        inactive_button.setEnabled(False)
+        inactive_button.setFixedHeight(20)
+        inactive_button.setMinimumWidth(0)
+        inactive_dot = QLabel("•")
+        inactive_dot.setObjectName("runtimeMockRouteDot")
+        inactive_dot.setProperty("mockDotState", "inactive")
+
+        active_wrap = QHBoxLayout()
+        active_wrap.setContentsMargins(0, 0, 0, 0)
+        active_wrap.setSpacing(4)
+        active_wrap.addWidget(active_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        active_wrap.addWidget(active_button, 0)
+
+        inactive_wrap = QHBoxLayout()
+        inactive_wrap.setContentsMargins(0, 0, 0, 0)
+        inactive_wrap.setSpacing(4)
+        inactive_wrap.addWidget(inactive_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        inactive_wrap.addWidget(inactive_button, 0)
+
+        segmented_layout.addLayout(active_wrap, 0)
+        segmented_layout.addLayout(inactive_wrap, 0)
+        layout.addWidget(segmented)
+
+        self._transport_mock_controls.append(
+            {
+                "active_button": active_button,
+                "inactive_button": inactive_button,
+                "active_dot": active_dot,
+                "inactive_dot": inactive_dot,
+                "active_kind": active_kind,
+            }
+        )
+        return frame
+
     def _bind_coordinator(self) -> None:
         if self.coordinator is None:
             return
@@ -221,6 +316,7 @@ class RuntimeTestTab(QWidget):
             api_key=credentials["api_key"],
             api_secret=credentials["api_secret"],
             api_passphrase=credentials.get("api_passphrase", ""),
+            account_profile=self._runtime_account_profile(credentials),
             target_notional=self.notional_input.text().strip() or "10",
         )
 
@@ -311,12 +407,13 @@ class RuntimeTestTab(QWidget):
         self.exchange_select.blockSignals(True)
         self.exchange_select.clear()
         if self.coordinator is not None:
-            self._exchange_items = list(self.coordinator.available_exchanges())
+            self._exchange_items = list(self.coordinator.available_execution_exchanges())
         else:
             self._exchange_items = [("binance", "Binance"), ("bybit", "Bybit")]
         for exchange_code, title in self._exchange_items:
             self.exchange_select.addItem(title, exchange_code)
         self.exchange_select.blockSignals(False)
+        self._populate_route_options()
 
     def _current_exchange_code(self) -> str:
         return str(self.exchange_select.currentData() or "binance").strip().lower()
@@ -331,6 +428,7 @@ class RuntimeTestTab(QWidget):
         self._display_to_symbol = {}
         self._symbols = []
         self._symbol_model.setStringList([])
+        self._populate_route_options()
         self._prefetch_current_exchange()
         if self.coordinator is None:
             return
@@ -357,8 +455,31 @@ class RuntimeTestTab(QWidget):
                     "api_key": api_key,
                     "api_secret": api_secret,
                     "api_passphrase": str(card.get("api_passphrase", "")).strip(),
+                    "account_profile": dict(card.get("account_snapshot", {}).get("account_profile", {}) or {}),
                 }
         return None
+
+    def _populate_route_options(self) -> None:
+        exchange_code = self._current_exchange_code()
+        credentials = self._load_connected_exchange_credentials(exchange_code) or {}
+        account_profile = dict(credentials.get("account_profile", {}) or {})
+        if self.coordinator is not None:
+            routes = list(self.coordinator.available_execution_routes(exchange_code, account_profile))
+        else:
+            routes = [("binance_usdm_trade_ws", "WS")]
+        self.route_select.blockSignals(True)
+        self.route_select.clear()
+        for route_code, title in routes:
+            self.route_select.addItem(title, route_code)
+        self.route_select.setEnabled(len(routes) > 1)
+        self.route_select.blockSignals(False)
+
+    def _runtime_account_profile(self, credentials: dict) -> dict:
+        profile = dict(credentials.get("account_profile", {}) or {})
+        selected_route = str(self.route_select.currentData() or "").strip()
+        if selected_route:
+            profile["selected_execution_route"] = selected_route
+        return profile
 
     @staticmethod
     def _make_value_label() -> QLabel:
@@ -396,6 +517,18 @@ class RuntimeTestTab(QWidget):
                 border: 1px solid {theme_color('border')};
                 border-radius: 16px;
             }}
+            QWidget#runtimeTransportMock {{
+                background: transparent;
+                border: none;
+            }}
+            QWidget#runtimeMockSide {{
+                background: transparent;
+                border: none;
+            }}
+            QFrame#runtimeMockSegment {{
+                background: transparent;
+                border: none;
+            }}
             QLabel#runtimeTitle {{
                 color: {theme_color('text_primary')};
                 font-size: 22px;
@@ -412,6 +545,21 @@ class RuntimeTestTab(QWidget):
                 padding: 7px 12px;
                 font-weight: 700;
                 color: {theme_color('text_primary')};
+            }}
+            QLabel#runtimeMockRouteDot {{
+                font-size: 15px;
+                font-weight: 900;
+                min-width: 10px;
+                max-width: 10px;
+                background: transparent;
+                border: none;
+                padding: 0px;
+            }}
+            QLabel#runtimeMockRouteDot[mockDotState="active"] {{
+                color: #18e06f;
+            }}
+            QLabel#runtimeMockRouteDot[mockDotState="inactive"] {{
+                color: {theme_color('text_muted')};
             }}
             QLineEdit#runtimeInput {{
                 background-color: {theme_color('window_bg')};
@@ -465,3 +613,54 @@ class RuntimeTestTab(QWidget):
         self.stop_btn.setStyleSheet(button_style("secondary"))
         self.buy_btn.setStyleSheet(button_style("success"))
         self.sell_btn.setStyleSheet(button_style("warning"))
+        for control in self._transport_mock_controls:
+            active_button = control["active_button"]
+            inactive_button = control["inactive_button"]
+            active_kind = str(control["active_kind"])
+            accent = theme_color("accent")
+            success = theme_color("success")
+            warning = theme_color("warning")
+            active_border = accent
+            if active_kind == "warning":
+                active_border = warning
+            elif active_kind == "success":
+                active_border = success
+            active_button.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background-color: transparent;
+                    color: {theme_color('text_primary')};
+                    border: 1px solid {active_border};
+                    border-radius: 9px;
+                    padding: 0px 10px;
+                    font-size: 11px;
+                    font-weight: 700;
+                }}
+                QPushButton:hover {{
+                    background-color: {theme_color('surface_alt')};
+                    border: 1px solid {active_border};
+                }}
+                QPushButton:pressed {{
+                    background-color: {theme_color('surface_alt')};
+                    border: 1px solid {active_border};
+                }}
+                """
+            )
+            inactive_button.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background-color: transparent;
+                    color: {theme_color('text_muted')};
+                    border: 1px solid {theme_color('border')};
+                    border-radius: 9px;
+                    padding: 0px 10px;
+                    font-size: 11px;
+                    font-weight: 700;
+                }}
+                QPushButton:disabled {{
+                    background-color: {theme_color('surface_alt')};
+                    color: {theme_color('text_muted')};
+                    border: 1px solid {theme_color('border')};
+                }}
+                """
+            )

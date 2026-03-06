@@ -105,6 +105,14 @@ class BybitAccountConnector:
             spot_enabled=False,
             futures_enabled=True,
             can_trade=True,
+            account_profile={
+                "account_type": "unified",
+                "account_mode": "uta",
+                "supports_spot": False,
+                "supports_futures": True,
+                "preferred_execution_route": "bybit_linear_trade_ws",
+                "detected_via": ["v5_wallet_balance", "v5_position_list"],
+            },
         )
 
     def _load_linear_positions(self, client: BybitV5HttpClient) -> list[dict[str, Any]]:

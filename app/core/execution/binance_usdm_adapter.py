@@ -154,6 +154,15 @@ class BinanceUsdmExecutionAdapter(ExecutionAdapter):
         text = str(value)
         return text if text else None
 
+    @staticmethod
+    def _int_or_none(value: Any) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
     def _assert_route(self, route_name: str) -> None:
         if route_name != self.ROUTE_NAME:
             raise ValueError(f"Unsupported execution route: {route_name}")

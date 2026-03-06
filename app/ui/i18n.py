@@ -32,10 +32,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "placeholder.block_text": "Эта область оставлена облегченной и готова к полной переработке.",
         "placeholder.ready": "Готово",
         "placeholder.clicked": "Нажато: {label}",
-        "runtime.title": "Тестовый Binance runtime",
-        "runtime.subtitle": "Один инструмент Binance Futures, live L1, test order через trade WS и execution events через user data stream.",
+        "runtime.title": "Тестовый execution runtime",
+        "runtime.subtitle": "Один futures-инструмент, live L1, test order через trade WS и execution events через private stream.",
         "runtime.market_type": "Фьючерз бесср.",
-        "runtime.symbol_placeholder": "Введите инструмент Binance Futures",
+        "runtime.symbol_placeholder": "Введите futures-инструмент",
         "runtime.notional": "USDT",
         "runtime.start": "Старт",
         "runtime.stop": "Стоп",
@@ -56,7 +56,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "runtime.send_to_first_event_latency": "Send->1st event",
         "runtime.fill_latency": "Fill",
         "runtime.send_to_fill_latency": "Send->Fill",
-        "runtime.error.no_credentials": "Нет подключенной карточки Binance с ключами.",
+        "runtime.error.no_credentials": "Нет подключенной карточки выбранной биржи с ключами.",
         "runtime.error.no_symbol": "Сначала выберите инструмент.",
         "runtime.log.starting": "Старт runtime для {symbol}",
         "runtime.log.stopping": "Остановка runtime",
@@ -144,10 +144,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "placeholder.block_text": "This area is intentionally lightweight and ready for a full rewrite.",
         "placeholder.ready": "Ready",
         "placeholder.clicked": "Clicked: {label}",
-        "runtime.title": "Binance test runtime",
-        "runtime.subtitle": "Single Binance Futures instrument, live L1, test order via trade WS, and execution events via user data stream.",
+        "runtime.title": "Execution test runtime",
+        "runtime.subtitle": "Single futures instrument, live L1, test order via trade WS, and execution events via private stream.",
         "runtime.market_type": "Futures Perpetual",
-        "runtime.symbol_placeholder": "Enter Binance Futures instrument",
+        "runtime.symbol_placeholder": "Enter futures instrument",
         "runtime.notional": "USDT",
         "runtime.start": "Start",
         "runtime.stop": "Stop",
@@ -166,7 +166,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "runtime.send_to_first_event_latency": "Send->1st event",
         "runtime.fill_latency": "Fill",
         "runtime.send_to_fill_latency": "Send->Fill",
-        "runtime.error.no_credentials": "No connected Binance card with credentials.",
+        "runtime.error.no_credentials": "No connected card with credentials for the selected exchange.",
         "runtime.error.no_symbol": "Select an instrument first.",
         "runtime.log.starting": "Starting runtime for {symbol}",
         "runtime.log.stopping": "Stopping runtime",
@@ -227,6 +227,26 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "exchange.unknown_base_name": "Exchange",
     },
 }
+
+TRANSLATIONS["ru"].update(
+    {
+        "spread.transport.choose_exchange": "Сначала выберите биржу",
+        "spread.transport.binance_rest_unavailable": "REST для Binance пока не подключен",
+        "spread.transport.bitget_ws_unavailable": "WS для Bitget требует аккаунт UTA",
+        "spread.transport.bybit_ws_unavailable": "WS для Bybit пока не подключен",
+        "spread.transport.bybit_rest_unavailable": "REST для Bybit пока не подключен",
+    }
+)
+
+TRANSLATIONS["en"].update(
+    {
+        "spread.transport.choose_exchange": "Choose exchange first",
+        "spread.transport.binance_rest_unavailable": "REST for Binance is not connected yet",
+        "spread.transport.bitget_ws_unavailable": "WS for Bitget requires a UTA account",
+        "spread.transport.bybit_ws_unavailable": "WS for Bybit is not connected yet",
+        "spread.transport.bybit_rest_unavailable": "REST for Bybit is not connected yet",
+    }
+)
 
 
 class UiLanguageManager(QObject):

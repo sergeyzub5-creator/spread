@@ -6,7 +6,10 @@ from decimal import Decimal
 from PySide6.QtCore import QObject, Signal
 
 from app.core.accounts.binance_account_connector import BinanceAccountConnector
+from app.core.accounts.bitget_account_connector import BitgetAccountConnector
 from app.core.accounts.bybit_account_connector import BybitAccountConnector
+from app.core.instruments.bitget_linear_loader import BitgetLinearInstrumentLoader
+from app.core.instruments.bitget_spot_loader import BitgetSpotInstrumentLoader
 from app.core.events.bus import EventBus
 from app.core.instruments.binance_spot_loader import BinanceSpotInstrumentLoader
 from app.core.instruments.binance_usdm_loader import BinanceUsdmInstrumentLoader
@@ -15,6 +18,10 @@ from app.core.instruments.bybit_spot_loader import BybitSpotInstrumentLoader
 from app.core.instruments.market_cap_ranker import MarketCapRanker
 from app.core.instruments.registry import InstrumentRegistry
 from app.core.logging.logger_factory import get_logger
+from app.core.market_data.bitget_linear_connector import BitgetLinearPublicConnector
+from app.core.market_data.bitget_linear_normalizer import BitgetLinearQuoteNormalizer
+from app.core.market_data.bitget_spot_connector import BitgetSpotPublicConnector
+from app.core.market_data.bitget_spot_normalizer import BitgetSpotQuoteNormalizer
 from app.core.market_data.binance_spot_connector import BinanceSpotPublicConnector
 from app.core.market_data.binance_spot_normalizer import BinanceSpotQuoteNormalizer
 from app.core.market_data.binance_usdm_connector import BinanceUsdmPublicConnector
@@ -126,19 +133,25 @@ class UiCoordinator(QObject):
         self.event_bus = event_bus
         self._binance_spot_loader = BinanceSpotInstrumentLoader()
         self._binance_loader = BinanceUsdmInstrumentLoader()
+        self._bitget_linear_loader = BitgetLinearInstrumentLoader()
+        self._bitget_spot_loader = BitgetSpotInstrumentLoader()
         self._bybit_spot_loader = BybitSpotInstrumentLoader()
         self._bybit_linear_loader = BybitLinearInstrumentLoader()
         self._market_cap_ranker = MarketCapRanker()
         self._binance_account_connector = BinanceAccountConnector()
+        self._bitget_account_connector = BitgetAccountConnector()
         self._bybit_account_connector = BybitAccountConnector()
         self._binance_spot_loaded = False
         self._binance_perp_loaded = False
+        self._bitget_perp_loaded = False
+        self._bitget_spot_loaded = False
         self._bybit_spot_loaded = False
         self._bybit_perp_loaded = False
         self._loading_market_types: set[tuple[str, str]] = set()
         self._load_lock = threading.Lock()
         self._subscriptions: dict[str, tuple[object, object]] = {}
         self._account_monitors: dict[str, _RestAccountMonitor] = {}
+        self._shutdown = False
         self._logger = get_logger("ui.coordinator")
         self.event_bus.subscribe("worker_state", self._on_worker_state)
         self.event_bus.subscribe("worker_events", self._on_worker_event)
@@ -155,6 +168,16 @@ class UiCoordinator(QObject):
             normalizer=BinanceUsdmQuoteNormalizer(),
         )
         self.market_data_service.register_exchange_transport(
+            transport_key="bitget:spot",
+            connector=BitgetSpotPublicConnector(),
+            normalizer=BitgetSpotQuoteNormalizer(),
+        )
+        self.market_data_service.register_exchange_transport(
+            transport_key="bitget:linear_perp",
+            connector=BitgetLinearPublicConnector(),
+            normalizer=BitgetLinearQuoteNormalizer(),
+        )
+        self.market_data_service.register_exchange_transport(
             transport_key="bybit:linear_perp",
             connector=BybitLinearPublicConnector(),
             normalizer=BybitLinearQuoteNormalizer(),
@@ -165,11 +188,44 @@ class UiCoordinator(QObject):
             normalizer=BybitSpotQuoteNormalizer(),
         )
 
+    def available_quote_exchanges(self) -> list[tuple[str, str]]:
+        return [("binance", "Binance"), ("bitget", "Bitget"), ("bybit", "Bybit")]
+
+    def available_account_exchanges(self) -> list[tuple[str, str]]:
+        return [("binance", "Binance"), ("bitget", "Bitget"), ("bybit", "Bybit")]
+
+    def available_execution_exchanges(self) -> list[tuple[str, str]]:
+        return [("binance", "Binance"), ("bitget", "Bitget"), ("bybit", "Bybit")]
+
+    def available_execution_routes(
+        self,
+        exchange: str,
+        account_profile: dict | None = None,
+    ) -> list[tuple[str, str]]:
+        normalized_exchange = str(exchange or "").strip().lower()
+        profile = dict(account_profile or {})
+        if normalized_exchange == "bitget":
+            routes = [("bitget_linear_rest_probe", "REST"), ("bitget_linear_trade_ws", "WS")]
+            preferred = str(profile.get("selected_execution_route") or profile.get("preferred_execution_route") or "").strip()
+            if preferred == "bitget_linear_trade_ws":
+                return [("bitget_linear_trade_ws", "WS"), ("bitget_linear_rest_probe", "REST")]
+            return routes
+        if normalized_exchange == "binance":
+            return [("binance_usdm_trade_ws", "WS")]
+        if normalized_exchange == "bybit":
+            return [("bybit_linear_trade_ws", "WS")]
+        return []
+
     def available_exchanges(self) -> list[tuple[str, str]]:
-        return [("binance", "Binance"), ("bybit", "Bybit")]
+        return self.available_account_exchanges()
 
     def list_market_types(self, exchange: str) -> list[tuple[str, str]]:
         if exchange == "binance":
+            return [
+                (UiInstrumentType.SPOT.value, UI_INSTRUMENT_TYPE_LABELS[UiInstrumentType.SPOT]),
+                (UiInstrumentType.PERPETUAL.value, UI_INSTRUMENT_TYPE_LABELS[UiInstrumentType.PERPETUAL]),
+            ]
+        if exchange == "bitget":
             return [
                 (UiInstrumentType.SPOT.value, UI_INSTRUMENT_TYPE_LABELS[UiInstrumentType.SPOT]),
                 (UiInstrumentType.PERPETUAL.value, UI_INSTRUMENT_TYPE_LABELS[UiInstrumentType.PERPETUAL]),
@@ -280,9 +336,11 @@ class UiCoordinator(QObject):
         ).start()
 
     def start_exchange_monitor(self, monitor_id: str, exchange: str, params: dict) -> None:
+        if self._shutdown:
+            return
         exchange_code = str(exchange or "").strip().lower()
         self.stop_exchange_monitor(monitor_id)
-        if exchange_code not in {"binance", "bybit"}:
+        if exchange_code not in {"binance", "bitget", "bybit"}:
             return
 
         credentials = ExchangeCredentials(
@@ -295,10 +353,20 @@ class UiCoordinator(QObject):
         self._account_monitors[monitor_id] = monitor
 
         def _on_snapshot(snapshot) -> None:
-            self.exchange_snapshot_updated.emit(monitor_id, exchange_code, snapshot.to_dict())
+            if self._shutdown:
+                return
+            try:
+                self.exchange_snapshot_updated.emit(monitor_id, exchange_code, snapshot.to_dict())
+            except RuntimeError:
+                self.stop_exchange_monitor(monitor_id)
 
         def _on_error(message: str) -> None:
-            self.exchange_snapshot_update_failed.emit(monitor_id, exchange_code, message)
+            if self._shutdown:
+                return
+            try:
+                self.exchange_snapshot_update_failed.emit(monitor_id, exchange_code, message)
+            except RuntimeError:
+                self.stop_exchange_monitor(monitor_id)
 
         def _run() -> None:
             try:
@@ -306,7 +374,12 @@ class UiCoordinator(QObject):
                 self._logger.info("exchange monitor started | exchange=%s | monitor_id=%s", exchange_code, monitor_id)
             except Exception as exc:
                 self._account_monitors.pop(monitor_id, None)
-                self.exchange_snapshot_update_failed.emit(monitor_id, exchange_code, str(exc))
+                if self._shutdown:
+                    return
+                try:
+                    self.exchange_snapshot_update_failed.emit(monitor_id, exchange_code, str(exc))
+                except RuntimeError:
+                    self.stop_exchange_monitor(monitor_id)
 
         threading.Thread(target=_run, name=f"exchange-monitor-{exchange_code}", daemon=True).start()
 
@@ -316,6 +389,14 @@ class UiCoordinator(QObject):
             return
         monitor.stop()
         self._logger.info("exchange monitor stopped | monitor_id=%s", monitor_id)
+
+    def stop_all_exchange_monitors(self) -> None:
+        for monitor_id in list(self._account_monitors.keys()):
+            self.stop_exchange_monitor(monitor_id)
+
+    def shutdown(self) -> None:
+        self._shutdown = True
+        self.stop_all_exchange_monitors()
 
     def start_test_runtime_async(
         self,
@@ -327,6 +408,7 @@ class UiCoordinator(QObject):
         api_key: str,
         api_secret: str,
         api_passphrase: str = "",
+        account_profile: dict | None = None,
         target_notional: str = "10",
     ) -> None:
         self._logger.info(
@@ -355,6 +437,7 @@ class UiCoordinator(QObject):
                         api_key=str(api_key or "").strip(),
                         api_secret=str(api_secret or "").strip(),
                         api_passphrase=str(api_passphrase or "").strip(),
+                        account_profile=dict(account_profile or {}),
                     ),
                 )
                 self.worker_manager.start_worker(task)
@@ -402,6 +485,8 @@ class UiCoordinator(QObject):
         )
         if exchange == "binance":
             return self._binance_account_connector.connect(credentials)
+        if exchange == "bitget":
+            return self._bitget_account_connector.connect(credentials)
         if exchange == "bybit":
             return self._bybit_account_connector.connect(credentials)
         raise ValueError(f"Unsupported exchange: {exchange}")
@@ -415,6 +500,8 @@ class UiCoordinator(QObject):
         )
         if exchange == "binance":
             return self._binance_account_connector.close_all_positions(credentials)
+        if exchange == "bitget":
+            return self._bitget_account_connector.close_all_positions(credentials)
         if exchange == "bybit":
             return self._bybit_account_connector.close_all_positions(credentials)
         raise ValueError(f"Unsupported exchange: {exchange}")
@@ -425,6 +512,10 @@ class UiCoordinator(QObject):
             self._ensure_market_type_loaded(exchange, UiInstrumentType.PERPETUAL.value)
             return
         if exchange == "bybit":
+            self._ensure_market_type_loaded(exchange, UiInstrumentType.SPOT.value)
+            self._ensure_market_type_loaded(exchange, UiInstrumentType.PERPETUAL.value)
+            return
+        if exchange == "bitget":
             self._ensure_market_type_loaded(exchange, UiInstrumentType.SPOT.value)
             self._ensure_market_type_loaded(exchange, UiInstrumentType.PERPETUAL.value)
             return
@@ -457,13 +548,17 @@ class UiCoordinator(QObject):
     def _ensure_market_type_loaded(self, exchange: str, market_type: str) -> None:
         normalized_exchange = str(exchange or "").strip().lower()
         normalized_market_type = str(market_type or "").strip().lower()
-        if normalized_exchange not in {"binance", "bybit"}:
+        if normalized_exchange not in {"binance", "bitget", "bybit"}:
             raise ValueError(f"Unsupported exchange: {exchange}")
 
         with self._load_lock:
             if normalized_exchange == "binance" and normalized_market_type == UiInstrumentType.SPOT.value and self._binance_spot_loaded:
                 return
             if normalized_exchange == "binance" and normalized_market_type == UiInstrumentType.PERPETUAL.value and self._binance_perp_loaded:
+                return
+            if normalized_exchange == "bitget" and normalized_market_type == UiInstrumentType.PERPETUAL.value and self._bitget_perp_loaded:
+                return
+            if normalized_exchange == "bitget" and normalized_market_type == UiInstrumentType.SPOT.value and self._bitget_spot_loaded:
                 return
             if normalized_exchange == "bybit" and normalized_market_type == UiInstrumentType.SPOT.value and self._bybit_spot_loaded:
                 return
@@ -478,6 +573,13 @@ class UiCoordinator(QObject):
                     if not self._binance_spot_loaded:
                         self.instrument_registry.replace_exchange_instruments("binance", [*current, *spot_instruments])
                         self._binance_spot_loaded = True
+                return
+            if normalized_exchange == "bitget":
+                spot_instruments = self._bitget_spot_loader.load_instruments()
+                with self._load_lock:
+                    if not self._bitget_spot_loaded:
+                        self.instrument_registry.replace_exchange_instruments("bitget", spot_instruments)
+                        self._bitget_spot_loaded = True
                 return
             if normalized_exchange == "bybit":
                 spot_instruments = self._bybit_spot_loader.load_instruments()
@@ -497,6 +599,14 @@ class UiCoordinator(QObject):
                         self.instrument_registry.replace_exchange_instruments("binance", [*current, *perp_instruments])
                         self._binance_perp_loaded = True
                 return
+            if normalized_exchange == "bitget":
+                perp_instruments = self._bitget_linear_loader.load_instruments()
+                with self._load_lock:
+                    current = self.instrument_registry.list_by_exchange("bitget")
+                    if not self._bitget_perp_loaded:
+                        self.instrument_registry.replace_exchange_instruments("bitget", [*current, *perp_instruments])
+                        self._bitget_perp_loaded = True
+                return
             if normalized_exchange == "bybit":
                 perp_instruments = self._bybit_linear_loader.load_instruments()
                 with self._load_lock:
@@ -513,6 +623,10 @@ class UiCoordinator(QObject):
                 return self._binance_spot_loaded
             if market_type == UiInstrumentType.PERPETUAL.value:
                 return self._binance_perp_loaded
+        if exchange == "bitget" and market_type == UiInstrumentType.SPOT.value:
+            return self._bitget_spot_loaded
+        if exchange == "bitget" and market_type == UiInstrumentType.PERPETUAL.value:
+            return self._bitget_perp_loaded
         if exchange == "bybit" and market_type == UiInstrumentType.SPOT.value:
             return self._bybit_spot_loaded
         if exchange == "bybit" and market_type == UiInstrumentType.PERPETUAL.value:
@@ -546,6 +660,8 @@ class UiCoordinator(QObject):
     def _account_connector_for_exchange(self, exchange: str):
         if exchange == "binance":
             return self._binance_account_connector
+        if exchange == "bitget":
+            return self._bitget_account_connector
         if exchange == "bybit":
             return self._bybit_account_connector
         raise ValueError(f"Unsupported exchange: {exchange}")

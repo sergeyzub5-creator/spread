@@ -11,12 +11,59 @@
       "account_snapshot": {
         "exchange": "binance",
         "status_text": "Подключено · Spot + Futures",
-        "balance_text": "Баланс: 8.92 USDT",
+        "balance_text": "Баланс: 8.88 USDT",
         "positions_text": "Позиции: 0",
         "pnl_text": "PnL: 0.00 USDT",
         "spot_enabled": true,
         "futures_enabled": true,
-        "can_trade": true
+        "can_trade": true,
+        "account_profile": {
+          "account_type": "separate_spot_and_usdm",
+          "account_mode": "classic",
+          "supports_spot": true,
+          "supports_futures": true,
+          "preferred_execution_route": "binance_usdm_trade_ws",
+          "detected_via": [
+            "spot_account",
+            "futures_account"
+          ]
+        }
+      },
+      "connected": true
+    },
+    {
+      "exchange_code": "bitget",
+      "exchange_title": "Bitget Futures",
+      "exchange_name": "Bitget",
+      "api_key": "bg_f45df96c559fb1c3dd517f5d9da0a533",
+      "api_secret": "21a32c3fc36a8509b8007b357051bf6eaf6101864e1f86292715b2cce7be3909",
+      "api_passphrase": "12345678",
+      "testnet": false,
+      "account_snapshot": {
+        "exchange": "bitget",
+        "status_text": "Подключено · Spot + Futures",
+        "balance_text": "Баланс: 14.54 USDT",
+        "positions_text": "Позиции: 0",
+        "pnl_text": "PnL: 0.00 USDT",
+        "spot_enabled": true,
+        "futures_enabled": true,
+        "can_trade": true,
+        "account_profile": {
+          "account_type": "classic",
+          "account_mode": "classic",
+          "switch_status": "classic_only",
+          "supports_spot": true,
+          "supports_futures": true,
+          "preferred_execution_route": "bitget_linear_trade_ws",
+          "execution_stack": "classic_v2_private_ws",
+          "detected_via": [
+            "spot_assets_v2",
+            "futures_accounts_v2",
+            null
+          ],
+          "switch_status_error": "You are in Classic Account mode, and the Unified Account API is not supported at this time",
+          "raw_switch_status": {}
+        }
       },
       "connected": true
     }

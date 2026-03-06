@@ -1,13 +1,13 @@
 {
   "spread_slots": {
     "left": {
-      "exchange": "binance",
+      "exchange": "bitget",
       "market_type": "perpetual",
       "symbol": null
     },
     "right": {
-      "exchange": "bybit",
-      "market_type": "perpetual",
+      "exchange": "binance",
+      "market_type": null,
       "symbol": null
     }
   }

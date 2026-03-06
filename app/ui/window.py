@@ -278,6 +278,8 @@ class AppWindow(QMainWindow):
         if self._shutdown_splash is None:
             self._shutdown_splash = ShutdownSplash()
         self.status_bar.stop_background_tasks()
+        if self.coordinator is not None:
+            self.coordinator.shutdown()
         self._shutdown_splash.start()
         self._shutdown_splash.finish()
         QTimer.singleShot(430, QApplication.instance().quit)

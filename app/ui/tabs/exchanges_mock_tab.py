@@ -152,7 +152,7 @@ class ExchangesMockTab(QWidget):
 
     def _open_add_dialog(self) -> None:
         if self.coordinator is not None:
-            exchange_codes = [code for code, _title in self.coordinator.available_exchanges()]
+            exchange_codes = [code for code, _title in self.coordinator.available_account_exchanges()]
         else:
             exchange_codes = ["binance", "bybit"]
         picker = ExchangePickerDialog(exchange_codes, self)

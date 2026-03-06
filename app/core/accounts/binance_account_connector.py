@@ -166,6 +166,14 @@ class BinanceAccountConnector:
                 spot_enabled=spot_enabled,
                 futures_enabled=futures_enabled,
                 can_trade=can_trade,
+                account_profile={
+                    "account_type": "separate_spot_and_usdm",
+                    "account_mode": "classic",
+                    "supports_spot": spot_enabled,
+                    "supports_futures": futures_enabled,
+                    "preferred_execution_route": "binance_usdm_trade_ws" if futures_enabled else None,
+                    "detected_via": ["spot_account", "futures_account"],
+                },
             )
 
         spot_balances = spot_payload.get("balances", []) if isinstance(spot_payload, dict) else []
@@ -198,6 +206,14 @@ class BinanceAccountConnector:
             spot_enabled=spot_enabled,
             futures_enabled=futures_enabled,
             can_trade=can_trade,
+            account_profile={
+                "account_type": "spot_only",
+                "account_mode": "classic",
+                "supports_spot": spot_enabled,
+                "supports_futures": futures_enabled,
+                "preferred_execution_route": None,
+                "detected_via": ["spot_account"],
+            },
         )
 
     @staticmethod

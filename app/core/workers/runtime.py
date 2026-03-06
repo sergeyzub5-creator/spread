@@ -6,6 +6,8 @@ from typing import Any
 
 from app.core.events.bus import EventBus
 from app.core.execution.binance_usdm_adapter import BinanceUsdmExecutionAdapter
+from app.core.execution.bitget_linear_adapter import BitgetLinearExecutionAdapter
+from app.core.execution.bitget_linear_rest_adapter import BitgetLinearRestExecutionAdapter
 from app.core.execution.bybit_linear_adapter import BybitLinearExecutionAdapter
 from app.core.execution.adapter import ExecutionAdapter
 from app.core.logging.logger_factory import get_logger
@@ -310,6 +312,20 @@ class WorkerRuntime:
             return adapter
         if self._active_instrument.exchange == "bybit" and self._active_instrument.market_type == "linear_perp":
             adapter = BybitLinearExecutionAdapter(credentials)
+            adapter.connect()
+            adapter.on_execution_event(self.on_execution_event)
+            self._execution_adapter = adapter
+            return adapter
+        if self._active_instrument.exchange == "bitget" and self._active_instrument.market_type == "linear_perp":
+            selected_route = str(
+                credentials.account_profile.get("selected_execution_route")
+                or credentials.account_profile.get("preferred_execution_route")
+                or ""
+            ).strip().lower()
+            if selected_route == "bitget_linear_rest_probe":
+                adapter = BitgetLinearRestExecutionAdapter(credentials)
+            else:
+                adapter = BitgetLinearExecutionAdapter(credentials)
             adapter.connect()
             adapter.on_execution_event(self.on_execution_event)
             self._execution_adapter = adapter

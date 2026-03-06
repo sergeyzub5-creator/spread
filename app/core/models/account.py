@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 
 @dataclass(frozen=True, slots=True)
@@ -9,6 +9,7 @@ class ExchangeCredentials:
     api_key: str
     api_secret: str
     api_passphrase: str = ""
+    account_profile: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -24,6 +25,7 @@ class ExchangeAccountSnapshot:
     spot_enabled: bool
     futures_enabled: bool
     can_trade: bool
+    account_profile: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)

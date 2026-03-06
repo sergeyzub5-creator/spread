@@ -7,6 +7,7 @@ from PySide6.QtCore import QPoint, QSize, QStringListModel, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFocusEvent, QIcon, QMouseEvent, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QCompleter, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton, QSizePolicy, QStyle, QVBoxLayout, QWidget
 
+from app.ui.exchange_store import load_exchange_cards
 from app.ui.i18n import tr
 from app.ui.theme import theme_color
 from app.ui.widgets.exchange_badge import build_exchange_icon
@@ -73,6 +74,7 @@ class SpreadMockTab(QWidget):
         self._pair_models: dict[str, QStringListModel] = {}
         self._pair_completers: dict[str, QCompleter] = {}
         self._quote_labels: dict[str, dict[str, QLabel]] = {}
+        self._transport_widgets: dict[str, dict[str, object]] = {}
         self._pending_quotes: dict[str, dict] = {}
         self._strategy_field_labels: list[QLabel] = []
         self._spread_value_label: QLabel | None = None
@@ -172,7 +174,7 @@ class SpreadMockTab(QWidget):
         saved = self._load_saved_state()
         if not saved:
             return
-        exchanges = dict(self.coordinator.available_exchanges())
+        exchanges = dict(self.coordinator.available_quote_exchanges())
         for slot_name in ("left", "right"):
             state = saved.get(slot_name) or {}
             exchange = state.get("exchange")
@@ -181,6 +183,7 @@ class SpreadMockTab(QWidget):
             if exchange and exchange in exchanges:
                 self._slot_state[slot_name]["exchange"] = exchange
                 self._apply_exchange_button_state(slot_name, exchange, exchanges[exchange])
+                self._update_transport_widget(slot_name)
             if exchange and market_type:
                 market_types = dict(self.coordinator.list_market_types(exchange))
                 market_title = market_types.get(market_type)
@@ -395,10 +398,150 @@ class SpreadMockTab(QWidget):
         self._pair_models[slot_name] = pair_model
         self._pair_completers[slot_name] = pair_completer
 
+        pair_row = QGridLayout()
+        pair_row.setContentsMargins(0, 0, 0, 0)
+        pair_row.setHorizontalSpacing(8)
+        pair_row.setVerticalSpacing(0)
+        pair_row.setColumnMinimumWidth(0, 62)
+        pair_row.setColumnMinimumWidth(2, 62)
+
+        ws_widget = self._build_transport_widget(slot_name, "ws")
+        rest_widget = self._build_transport_widget(slot_name, "rest")
+
+        pair_row.addWidget(ws_widget, 0, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        pair_row.addWidget(pair_input, 0, 1, Qt.AlignmentFlag.AlignCenter)
+        pair_row.addWidget(rest_widget, 0, 2, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
         col.addWidget(exchange_btn, 0, Qt.AlignmentFlag.AlignCenter)
         col.addWidget(market_type_btn, 0, Qt.AlignmentFlag.AlignCenter)
-        col.addWidget(pair_input, 0, Qt.AlignmentFlag.AlignCenter)
+        col.addLayout(pair_row)
         return box
+
+    def _build_transport_widget(self, slot_name: str, route_name: str) -> QWidget:
+        widget = QWidget()
+        widget.setObjectName("transportWidget")
+        widget.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        widget.setFixedWidth(62)
+        row = QHBoxLayout(widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+
+        dot = QLabel("•")
+        dot.setObjectName("transportDot")
+
+        button = QPushButton("WS" if route_name == "ws" else "REST")
+        button.setObjectName("transportBadge")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.setFixedHeight(20)
+        button.setFixedWidth(44)
+
+        row.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        slot_controls = self._transport_widgets.setdefault(slot_name, {})
+        slot_controls[f"{route_name}_widget"] = widget
+        slot_controls[f"{route_name}_dot"] = dot
+        slot_controls[f"{route_name}_button"] = button
+        self._update_transport_widget(slot_name)
+        return widget
+
+    def _transport_state_for_exchange(self, exchange: str | None) -> dict[str, dict[str, str | bool]]:
+        default = {
+            "ws": {"active": False, "available": False, "reason": tr("spread.transport.choose_exchange")},
+            "rest": {"active": False, "available": False, "reason": tr("spread.transport.choose_exchange")},
+        }
+        if not exchange:
+            return default
+        normalized = str(exchange).strip().lower()
+        if normalized == "binance":
+            return {
+                "ws": {"active": True, "available": True, "reason": ""},
+                "rest": {"active": False, "available": False, "reason": tr("spread.transport.binance_rest_unavailable")},
+            }
+        if normalized == "bitget":
+            account_profile = self._find_connected_account_profile("bitget")
+            is_uta = str(account_profile.get("account_type", "")).strip().lower() == "uta"
+            return {
+                "ws": {
+                    "active": False if not is_uta else True,
+                    "available": bool(is_uta),
+                    "reason": "" if is_uta else tr("spread.transport.bitget_ws_unavailable"),
+                },
+                "rest": {"active": True if not is_uta else False, "available": True, "reason": ""},
+            }
+        if normalized == "bybit":
+            return {
+                "ws": {"active": False, "available": False, "reason": tr("spread.transport.bybit_ws_unavailable")},
+                "rest": {"active": False, "available": False, "reason": tr("spread.transport.bybit_rest_unavailable")},
+            }
+        return default
+
+    @staticmethod
+    def _find_connected_account_profile(exchange_code: str) -> dict:
+        for card in load_exchange_cards():
+            if str(card.get("exchange_code", "")).strip().lower() != str(exchange_code or "").strip().lower():
+                continue
+            if not bool(card.get("connected")):
+                continue
+            return dict(card.get("account_snapshot", {}).get("account_profile", {}) or {})
+        return {}
+
+    def _update_transport_widget(self, slot_name: str) -> None:
+        controls = self._transport_widgets.get(slot_name)
+        required_keys = {
+            "ws_widget",
+            "rest_widget",
+            "ws_dot",
+            "rest_dot",
+            "ws_button",
+            "rest_button",
+        }
+        if not controls or not required_keys.issubset(controls):
+            return
+        exchange = self._slot_state[slot_name]["exchange"]
+        state = self._transport_state_for_exchange(exchange)
+        ws_state = state["ws"]
+        rest_state = state["rest"]
+
+        controls["ws_widget"].setVisible(bool(exchange))
+        controls["rest_widget"].setVisible(bool(exchange))
+        self._apply_transport_badge_state(
+            dot=controls["ws_dot"],
+            button=controls["ws_button"],
+            label="WS",
+            active=bool(ws_state["active"]),
+            available=bool(ws_state["available"]),
+            reason=str(ws_state["reason"] or ""),
+        )
+        self._apply_transport_badge_state(
+            dot=controls["rest_dot"],
+            button=controls["rest_button"],
+            label="REST",
+            active=bool(rest_state["active"]),
+            available=bool(rest_state["available"]),
+            reason=str(rest_state["reason"] or ""),
+        )
+
+    def _apply_transport_badge_state(
+        self,
+        *,
+        dot: QLabel,
+        button: QPushButton,
+        label: str,
+        active: bool,
+        available: bool,
+        reason: str,
+    ) -> None:
+        button.setText(label)
+        button.setProperty("activeState", "active" if active else "inactive")
+        button.setEnabled(available)
+        button.setToolTip("" if available or not reason else reason)
+        dot.setProperty("activeState", "active" if active else "inactive")
+        dot.style().unpolish(dot)
+        dot.style().polish(dot)
+        button.style().unpolish(button)
+        button.style().polish(button)
 
     def _build_quote_panel(self, slot_name: str) -> QWidget:
         panel = QWidget()
@@ -462,7 +605,7 @@ class SpreadMockTab(QWidget):
     def _open_exchange_menu(self, slot_name: str) -> None:
         if self.coordinator is None:
             return
-        items = [(code, title, code) for code, title in self.coordinator.available_exchanges()]
+        items = [(code, title, code) for code, title in self.coordinator.available_quote_exchanges()]
         self._show_menu(self._exchange_buttons[slot_name], items, lambda value, title: self._set_exchange(slot_name, value, title))
 
     def _open_market_type_menu(self, slot_name: str) -> None:
@@ -605,6 +748,7 @@ class SpreadMockTab(QWidget):
         self._pair_inputs[slot_name].clear_selected_value_lock()
         self._pair_inputs[slot_name].setPlaceholderText(tr("spread.choose_instrument"))
         self._update_pair_clear_action(slot_name)
+        self._update_transport_widget(slot_name)
         self._clear_quotes(slot_name)
         if self.coordinator is not None:
             self.coordinator.prefetch_exchange_instruments(exchange)
@@ -907,6 +1051,52 @@ class SpreadMockTab(QWidget):
             QLineEdit#pairSelector:focus {{
                 background-color: {self._rgba(c_surface, 0.98)};
                 border: 1px solid {self._rgba(c_accent, 0.82)};
+            }}
+            QWidget#transportWidget {{
+                background: transparent;
+                border: none;
+            }}
+            QLabel#transportDot {{
+                color: {c_muted};
+                font-size: 15px;
+                font-weight: 900;
+                min-width: 10px;
+                max-width: 10px;
+                background: transparent;
+                border: none;
+                padding: 0;
+            }}
+            QLabel#transportDot[activeState="active"] {{
+                color: #18e06f;
+            }}
+            QLabel#transportDot[activeState="inactive"] {{
+                color: {c_muted};
+            }}
+            QPushButton#transportBadge {{
+                background-color: transparent;
+                color: {c_muted};
+                border: 1px solid {self._rgba(c_border, 0.72)};
+                border-radius: 9px;
+                padding: 0 10px;
+                font-size: 11px;
+                font-weight: 700;
+                min-height: 20px;
+            }}
+            QPushButton#transportBadge:hover:!disabled {{
+                background-color: {self._rgba(c_alt, 0.88)};
+            }}
+            QPushButton#transportBadge[activeState="active"] {{
+                color: {c_primary};
+                border: 1px solid {self._rgba(c_accent, 0.95)};
+            }}
+            QPushButton#transportBadge[activeState="inactive"] {{
+                color: {c_muted};
+                border: 1px solid {self._rgba(c_border, 0.72)};
+            }}
+            QPushButton#transportBadge:disabled {{
+                background-color: {self._rgba(c_alt, 0.62)};
+                color: {c_muted};
+                border: 1px solid {self._rgba(c_border, 0.62)};
             }}
             QWidget#quotePanel {{
                 background-color: transparent;
