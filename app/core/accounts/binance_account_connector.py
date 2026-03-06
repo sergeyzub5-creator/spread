@@ -10,8 +10,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from app.core.execution.binance_usdm_adapter import BinanceUsdmExecutionAdapter
 from app.core.logging.logger_factory import get_logger
 from app.core.models.account import ClosePositionsResult, ExchangeAccountSnapshot, ExchangeCredentials
+from app.core.models.execution import ExecutionOrderRequest
+from app.core.models.instrument import InstrumentId, InstrumentKey, InstrumentRouting, InstrumentSpec
 
 
 class BinanceApiError(RuntimeError):
@@ -28,7 +31,6 @@ class BinanceAccountConnector:
     SPOT_ACCOUNT_PATH = "/api/v3/account"
     FUTURES_ACCOUNT_PATH = "/fapi/v3/account"
     FUTURES_POSITION_MODE_PATH = "/fapi/v1/positionSide/dual"
-    FUTURES_NEW_ORDER_PATH = "/fapi/v1/order"
 
     def __init__(self, timeout_seconds: float = 10.0) -> None:
         self.timeout_seconds = float(timeout_seconds)
@@ -65,8 +67,7 @@ class BinanceAccountConnector:
             self._logger.warning("binance futures account check failed: %s", exc)
 
         if spot_payload is None and futures_payload is None:
-            message = self._format_connection_error(spot_error, futures_error)
-            raise BinanceApiError(message)
+            raise BinanceApiError(self._format_connection_error(spot_error, futures_error))
 
         return self._build_snapshot(spot_payload, futures_payload)
 
@@ -88,8 +89,7 @@ class BinanceAccountConnector:
         )
         hedge_mode = bool(position_mode_payload.get("dualSidePosition", False))
 
-        positions = futures_payload.get("positions", [])
-        close_requests = self._extract_close_requests(positions, hedge_mode=hedge_mode)
+        close_requests = self._extract_close_requests(futures_payload.get("positions", []), hedge_mode=hedge_mode)
         if not close_requests:
             snapshot = self.connect(credentials)
             return ClosePositionsResult(
@@ -103,23 +103,30 @@ class BinanceAccountConnector:
             "binance close all positions started: hedge_mode=%s count=%s symbols=%s",
             hedge_mode,
             len(close_requests),
-            ",".join(request["symbol"] for request in close_requests),
+            ",".join(request.instrument_id.symbol for request in close_requests),
         )
 
+        adapter = BinanceUsdmExecutionAdapter(credentials)
+        adapter.connect()
         failures: list[str] = []
         closed_symbols: list[str] = []
-        for request in close_requests:
-            try:
-                self._signed_post(
-                    base_url=self.FUTURES_BASE_URL,
-                    time_path=self.FUTURES_TIME_PATH,
-                    path=self.FUTURES_NEW_ORDER_PATH,
-                    credentials=credentials,
-                    params=request,
-                )
-                closed_symbols.append(str(request["symbol"]))
-            except Exception as exc:
-                failures.append(f"{request['symbol']}: {exc}")
+        try:
+            for request in close_requests:
+                try:
+                    result = adapter.place_order(request)
+                    self._logger.info(
+                        "binance close order ack: symbol=%s order_id=%s status=%s executed_qty=%s",
+                        result.symbol,
+                        result.order_id,
+                        result.status,
+                        result.executed_qty,
+                    )
+                    closed_symbols.append(request.instrument_id.symbol)
+                except Exception as exc:
+                    self._logger.error("binance close order failed: symbol=%s error=%s", request.instrument_id.symbol, exc)
+                    failures.append(f"{request.instrument_id.symbol}: {exc}")
+        finally:
+            adapter.close()
 
         if failures:
             raise BinanceApiError("; ".join(failures))
@@ -137,22 +144,18 @@ class BinanceAccountConnector:
             account_snapshot=snapshot,
         )
 
-    def _build_snapshot(self, spot_payload: dict[str, Any] | None, futures_payload: dict[str, Any] | None) -> ExchangeAccountSnapshot:
+    def _build_snapshot(
+        self,
+        spot_payload: dict[str, Any] | None,
+        futures_payload: dict[str, Any] | None,
+    ) -> ExchangeAccountSnapshot:
         spot_enabled = spot_payload is not None
         futures_enabled = futures_payload is not None
 
         if futures_payload is not None:
             wallet_balance = self._decimal_value(futures_payload.get("totalWalletBalance"))
             unrealized_pnl = self._decimal_value(futures_payload.get("totalUnrealizedProfit"))
-            positions = futures_payload.get("positions", [])
-            open_positions = 0
-            if isinstance(positions, list):
-                for position in positions:
-                    if not isinstance(position, dict):
-                        continue
-                    position_amt = self._decimal_value(position.get("positionAmt"))
-                    if position_amt != Decimal("0"):
-                        open_positions += 1
+            open_positions = self._count_open_positions(futures_payload.get("positions", []))
             can_trade = bool(futures_payload.get("canTrade", True))
             return ExchangeAccountSnapshot(
                 exchange="binance",
@@ -179,8 +182,13 @@ class BinanceAccountConnector:
                     funded_assets += 1
                 if str(balance.get("asset", "")).upper() == "USDT":
                     usdt_total = total
+
         can_trade = bool(spot_payload.get("canTrade", True)) if isinstance(spot_payload, dict) else True
-        balance_text = f"Баланс: {self._fmt_decimal(usdt_total)} USDT" if usdt_total != Decimal("0") else f"Баланс: активов {funded_assets}"
+        balance_text = (
+            f"Баланс: {self._fmt_decimal(usdt_total)} USDT"
+            if usdt_total != Decimal("0")
+            else f"Баланс: активов {funded_assets}"
+        )
         return ExchangeAccountSnapshot(
             exchange="binance",
             status_text=self._status_text(spot_enabled, futures_enabled, can_trade),
@@ -206,8 +214,7 @@ class BinanceAccountConnector:
 
     @staticmethod
     def _fmt_decimal(value: Decimal) -> str:
-        normalized = value.quantize(Decimal("0.01"))
-        return format(normalized, "f")
+        return format(value.quantize(Decimal("0.01")), "f")
 
     @staticmethod
     def _decimal_value(value: Any) -> Decimal:
@@ -232,24 +239,6 @@ class BinanceAccountConnector:
             credentials=credentials,
         )
 
-    def _signed_post(
-        self,
-        *,
-        base_url: str,
-        time_path: str,
-        path: str,
-        credentials: ExchangeCredentials,
-        params: dict[str, Any],
-    ) -> dict[str, Any]:
-        return self._signed_request(
-            method="POST",
-            base_url=base_url,
-            time_path=time_path,
-            path=path,
-            credentials=credentials,
-            params=params,
-        )
-
     def _signed_request(
         self,
         *,
@@ -262,7 +251,7 @@ class BinanceAccountConnector:
     ) -> dict[str, Any]:
         server_time_payload = self._public_get(base_url=base_url, path=time_path)
         timestamp = int(server_time_payload.get("serverTime", 0))
-        signed_params = {k: v for k, v in (params or {}).items() if v is not None}
+        signed_params = {key: value for key, value in (params or {}).items() if value is not None}
         signed_params["recvWindow"] = "5000"
         signed_params["timestamp"] = str(timestamp)
         query = urlencode(signed_params)
@@ -304,8 +293,7 @@ class BinanceAccountConnector:
     @staticmethod
     def _decode_error_payload(error: HTTPError) -> dict[str, Any]:
         try:
-            body = error.read().decode("utf-8")
-            payload = json.loads(body)
+            payload = json.loads(error.read().decode("utf-8"))
             if isinstance(payload, dict):
                 return payload
         except Exception:
@@ -331,6 +319,7 @@ class BinanceAccountConnector:
         return "Unknown Binance connection error"
 
     def _refresh_snapshot_after_close(self, credentials: ExchangeCredentials) -> ExchangeAccountSnapshot:
+        self._logger.info("binance snapshot refresh after close started")
         spot_payload = None
         try:
             spot_payload = self._signed_get(
@@ -354,10 +343,14 @@ class BinanceAccountConnector:
                 break
             time.sleep(0.5)
 
+        self._logger.info(
+            "binance snapshot refresh after close completed: open_positions=%s",
+            self._count_open_positions(last_futures_payload.get("positions", []) if isinstance(last_futures_payload, dict) else []),
+        )
         return self._build_snapshot(spot_payload, last_futures_payload)
 
-    def _extract_close_requests(self, positions: Any, *, hedge_mode: bool) -> list[dict[str, Any]]:
-        requests: list[dict[str, Any]] = []
+    def _extract_close_requests(self, positions: Any, *, hedge_mode: bool) -> list[ExecutionOrderRequest]:
+        requests: list[ExecutionOrderRequest] = []
         if not isinstance(positions, list):
             return requests
 
@@ -372,28 +365,25 @@ class BinanceAccountConnector:
             if not symbol:
                 continue
 
-            quantity = self._format_decimal(abs(position_amt))
-            if not quantity or quantity == "0":
-                continue
-
-            request: dict[str, Any] = {
-                "symbol": symbol,
-                "side": "SELL" if position_amt > 0 else "BUY",
-                "type": "MARKET",
-                "quantity": quantity,
-                "newOrderRespType": "RESULT",
-            }
-
+            position_side = None
+            reduce_only: bool | None = None
             if hedge_mode:
-                position_side = str(position.get("positionSide", "")).strip().upper()
-                if position_side in {"LONG", "SHORT"}:
-                    request["positionSide"] = position_side
-                else:
-                    request["positionSide"] = "LONG" if position_amt > 0 else "SHORT"
+                current_side = str(position.get("positionSide", "")).strip().upper()
+                position_side = current_side if current_side in {"LONG", "SHORT"} else ("LONG" if position_amt > 0 else "SHORT")
             else:
-                request["reduceOnly"] = "true"
+                reduce_only = True
 
-            requests.append(request)
+            requests.append(
+                ExecutionOrderRequest(
+                    instrument_id=self._futures_instrument_stub(symbol),
+                    side="SELL" if position_amt > 0 else "BUY",
+                    order_type="MARKET",
+                    quantity=abs(position_amt),
+                    position_side=position_side,
+                    reduce_only=reduce_only,
+                    response_type="RESULT",
+                )
+            )
 
         return requests
 
@@ -409,8 +399,27 @@ class BinanceAccountConnector:
         return count
 
     @staticmethod
-    def _format_decimal(value: Decimal) -> str:
-        text = format(value, "f")
-        if "." in text:
-            text = text.rstrip("0").rstrip(".")
-        return text or "0"
+    def _futures_instrument_stub(symbol: str) -> InstrumentId:
+        normalized_symbol = str(symbol or "").strip().upper()
+        return InstrumentId(
+            key=InstrumentKey(
+                exchange="binance",
+                market_type="linear_perp",
+                symbol=normalized_symbol,
+            ),
+            spec=InstrumentSpec(
+                base_asset="",
+                quote_asset="",
+                contract_type="perpetual",
+                settle_asset="USDT",
+                price_precision=Decimal("0"),
+                qty_precision=Decimal("0"),
+                min_qty=Decimal("0"),
+                min_notional=Decimal("0"),
+            ),
+            routing=InstrumentRouting(
+                ws_channel="bookTicker",
+                ws_symbol=normalized_symbol.lower(),
+                order_route="binance_usdm_trade_ws",
+            ),
+        )

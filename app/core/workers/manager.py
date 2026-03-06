@@ -17,6 +17,9 @@ class WorkerManager:
         self._workers: dict[str, WorkerRuntime] = {}
 
     def create_worker(self, task: WorkerTask) -> WorkerRuntime:
+        existing = self._workers.get(task.worker_id)
+        if existing is not None:
+            existing.stop()
         runtime = WorkerRuntime(task=task, market_data_service=self.market_data_service, event_bus=self.event_bus)
         self._workers[task.worker_id] = runtime
         return runtime
@@ -31,6 +34,12 @@ class WorkerManager:
         if runtime is None:
             return
         runtime.stop()
+
+    def submit_test_order(self, worker_id: str, side: str, submitted_at_ms: int | None = None) -> dict:
+        runtime = self._workers.get(worker_id)
+        if runtime is None:
+            raise KeyError(f"Worker not found: {worker_id}")
+        return runtime.submit_test_order(side, submitted_at_ms=submitted_at_ms)
 
     def get_worker(self, worker_id: str) -> WorkerRuntime | None:
         return self._workers.get(worker_id)

@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from app.core.models.account import ExchangeCredentials
 from app.core.models.instrument import InstrumentId
 
 
@@ -18,6 +19,7 @@ class WorkerTask:
     step_notional: Decimal
     execution_mode: str
     run_mode: str
+    execution_credentials: ExchangeCredentials | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)

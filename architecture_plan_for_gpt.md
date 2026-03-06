@@ -244,6 +244,9 @@ app/
     execution/
       __init__.py
       adapter.py
+      binance_usdm_adapter.py
+      binance_usdm_trade_ws.py
+      binance_usdm_user_data_stream.py
     events/
       __init__.py
       bus.py
@@ -258,6 +261,7 @@ app/
       service.py
     models/
       __init__.py
+      execution.py
       instrument.py
       market_data.py
       workers.py
@@ -271,13 +275,17 @@ app/
 
 - `app/ui/coordinator.py`: bridge between GUI shell and backend services
 - `app/core/models/instrument.py`: `InstrumentId` contract
+- `app/core/models/execution.py`: `ExecutionOrderRequest`, `ExecutionOrderResult`
 - `app/core/models/market_data.py`: `QuoteL1` contract
 - `app/core/models/workers.py`: `WorkerTask`, `WorkerState`, `WorkerEvent`
 - `app/core/instruments/registry.py`: canonical instrument storage and lookup
 - `app/core/market_data/service.py`: public WS orchestration and quote fan-out
 - `app/core/workers/manager.py`: create/start/stop worker runtimes
 - `app/core/workers/runtime.py`: single worker runtime implementation
-- `app/core/execution/adapter.py`: execution adapter contracts for future private/trading WS
+- `app/core/execution/adapter.py`: execution adapter contracts for private/trading WS
+- `app/core/execution/binance_usdm_trade_ws.py`: Binance USD-M trade websocket transport
+- `app/core/execution/binance_usdm_adapter.py`: Binance USD-M execution adapter over WS transport
+- `app/core/execution/binance_usdm_user_data_stream.py`: Binance USD-M user data stream for order lifecycle events
 - `app/core/events/bus.py`: lightweight event bus for worker and system events
 - `app/core/logging/logger_factory.py`: contextual logger creation with `worker_id`
 
@@ -372,19 +380,27 @@ Logging requirements:
 
 ## 9. Execution Architecture
 
-Current phase:
-- define contracts only
-
 Target shape:
 - `ExecutionAdapter` is exchange-specific
 - adapter uses private/trading websocket transport
 - adapter receives canonical execution requests tied to `InstrumentId`
 - adapter returns acknowledgements/fills/events to worker runtime
 
+Implemented now:
+- Binance USD-M execution uses Binance WebSocket API trade transport
+- signed requests are sent ad hoc per request using `apiKey`, `timestamp`, `recvWindow`, `signature`
+- current supported methods:
+  - `order.place`
+  - `order.cancel`
+  - `order.status`
+- Binance USD-M user data stream normalizes:
+  - `ORDER_TRADE_UPDATE`
+  - other futures user stream events as generic execution events
+- `Close positions` in account cards now routes order placement through this WS execution transport
+
 UNDECIDED:
-- exact order request model
-- exact fill event schema
-- exact retry model for execution channel
+- exact fill event schema for worker runtime
+- retry model beyond explicit reconnect per request path
 
 ## 10. Explicit Non-Goals / No Legacy
 
@@ -400,8 +416,8 @@ Do not add:
 
 - TODO: define concrete exchange connector interfaces for public WS
 - TODO: define instrument loading source per exchange
-- TODO: define execution request/ack/fill data contracts
-- TODO: connect current UI shell to `app/ui/coordinator.py`
+- TODO: connect normalized execution stream events to worker state/event bus
+- TODO: move worker start/stop flow from UI shell onto `WorkerManager`
 - TODO: choose initial runtime host model; design must remain compatible with process isolation from the start
 
 ## 12. Done Criteria

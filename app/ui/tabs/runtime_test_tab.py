@@ -1,0 +1,467 @@
+from __future__ import annotations
+
+import time
+
+from PySide6.QtCore import Qt, QStringListModel, QTimer, Signal
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QComboBox,
+    QCompleter,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QPlainTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+from app.ui.exchange_store import load_exchange_cards
+from app.ui.i18n import tr
+from app.ui.theme import button_style, theme_color
+
+
+class RuntimeTestTab(QWidget):
+    action_triggered = Signal(str)
+
+    def __init__(self, coordinator=None, parent=None) -> None:
+        super().__init__(parent)
+        self.coordinator = coordinator
+        self.worker_id = "test_runtime"
+        self._exchange_items: list[tuple[str, str]] = []
+        self._display_to_symbol: dict[str, str] = {}
+        self._symbols: list[str] = []
+        self._running = False
+        self._pending_state: dict | None = None
+        self._ui_state_timer = QTimer(self)
+        self._ui_state_timer.setInterval(50)
+        self._ui_state_timer.timeout.connect(self._flush_pending_state)
+        self._build_ui()
+        self.apply_theme()
+        self.retranslate_ui()
+        self._bind_coordinator()
+        self._populate_exchange_options()
+        self._prefetch_current_exchange()
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        hero = QFrame()
+        hero.setObjectName("runtimeHero")
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setContentsMargins(14, 14, 14, 14)
+        hero_layout.setSpacing(10)
+
+        title = QLabel()
+        title.setObjectName("runtimeTitle")
+        self.title_label = title
+        hero_layout.addWidget(title)
+
+        subtitle = QLabel()
+        subtitle.setObjectName("runtimeSubtitle")
+        subtitle.setWordWrap(True)
+        self.subtitle_label = subtitle
+        hero_layout.addWidget(subtitle)
+
+        selector_row = QHBoxLayout()
+        selector_row.setSpacing(10)
+        self.exchange_select = QComboBox()
+        self.exchange_select.setObjectName("runtimeSelect")
+        self.exchange_select.currentIndexChanged.connect(self._on_exchange_changed)
+        self.market_type_capsule = QLabel()
+        self.market_type_capsule.setObjectName("runtimeCapsule")
+        self.symbol_input = QLineEdit()
+        self.symbol_input.setObjectName("runtimeInput")
+        self.symbol_input.textEdited.connect(self._on_symbol_edited)
+        self.symbol_input.returnPressed.connect(self._hide_completer)
+        selector_row.addWidget(self.exchange_select, 0)
+        selector_row.addWidget(self.market_type_capsule, 0)
+        selector_row.addWidget(self.symbol_input, 1)
+        hero_layout.addLayout(selector_row)
+
+        controls_row = QHBoxLayout()
+        controls_row.setSpacing(8)
+        self.notional_input = QLineEdit("10")
+        self.notional_input.setObjectName("runtimeInput")
+        self.notional_input.setFixedWidth(100)
+        self.start_btn = QPushButton()
+        self.stop_btn = QPushButton()
+        self.buy_btn = QPushButton("BUY")
+        self.sell_btn = QPushButton("SELL")
+        self.start_btn.clicked.connect(self._start_runtime)
+        self.stop_btn.clicked.connect(self._stop_runtime)
+        self.buy_btn.clicked.connect(lambda: self._submit_order("BUY"))
+        self.sell_btn.clicked.connect(lambda: self._submit_order("SELL"))
+        controls_row.addWidget(self.notional_input, 0)
+        controls_row.addWidget(self.start_btn, 0)
+        controls_row.addWidget(self.stop_btn, 0)
+        controls_row.addWidget(self.buy_btn, 0)
+        controls_row.addWidget(self.sell_btn, 0)
+        controls_row.addStretch(1)
+        hero_layout.addLayout(controls_row)
+        root.addWidget(hero)
+
+        stats = QFrame()
+        stats.setObjectName("runtimeStats")
+        stats_layout = QGridLayout(stats)
+        stats_layout.setContentsMargins(12, 12, 12, 12)
+        stats_layout.setHorizontalSpacing(10)
+        stats_layout.setVerticalSpacing(10)
+        self.status_value = self._make_value_label()
+        self.bid_value = self._make_value_label()
+        self.ask_value = self._make_value_label()
+        self.order_status_value = self._make_value_label()
+        self.execution_value = self._make_value_label()
+        self.fill_value = self._make_value_label()
+        self.ack_latency_value = self._make_value_label()
+        self.click_to_send_latency_value = self._make_value_label()
+        self.send_to_ack_latency_value = self._make_value_label()
+        self.first_event_latency_value = self._make_value_label()
+        self.send_to_first_event_latency_value = self._make_value_label()
+        self.fill_latency_value = self._make_value_label()
+        self.send_to_fill_latency_value = self._make_value_label()
+        self._add_stat(stats_layout, 0, tr("runtime.status"), self.status_value)
+        self._add_stat(stats_layout, 1, tr("runtime.bid"), self.bid_value)
+        self._add_stat(stats_layout, 2, tr("runtime.ask"), self.ask_value)
+        self._add_stat(stats_layout, 3, tr("runtime.order_status"), self.order_status_value)
+        self._add_stat(stats_layout, 4, tr("runtime.execution"), self.execution_value)
+        self._add_stat(stats_layout, 5, tr("runtime.fill"), self.fill_value)
+        self._add_stat(stats_layout, 6, tr("runtime.ack_latency"), self.ack_latency_value)
+        self._add_stat(stats_layout, 7, tr("runtime.click_to_send_latency"), self.click_to_send_latency_value)
+        self._add_stat(stats_layout, 8, tr("runtime.send_to_ack_latency"), self.send_to_ack_latency_value)
+        self._add_stat(stats_layout, 9, tr("runtime.first_event_latency"), self.first_event_latency_value)
+        self._add_stat(
+            stats_layout,
+            10,
+            tr("runtime.send_to_first_event_latency"),
+            self.send_to_first_event_latency_value,
+        )
+        self._add_stat(stats_layout, 11, tr("runtime.fill_latency"), self.fill_latency_value)
+        self._add_stat(stats_layout, 12, tr("runtime.send_to_fill_latency"), self.send_to_fill_latency_value)
+        root.addWidget(stats)
+
+        self.log_output = QPlainTextEdit()
+        self.log_output.setReadOnly(True)
+        self.log_output.setObjectName("runtimeLog")
+        root.addWidget(self.log_output, 1)
+
+        self._symbol_model = QStringListModel(self)
+        self._symbol_completer = QCompleter(self._symbol_model, self)
+        self._symbol_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._symbol_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self._symbol_completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self._symbol_completer.activated.connect(self._on_symbol_selected)
+        self.symbol_input.setCompleter(self._symbol_completer)
+        self._update_running_state(False)
+
+    def _bind_coordinator(self) -> None:
+        if self.coordinator is None:
+            return
+        self.coordinator.instruments_loaded.connect(self._on_instruments_loaded)
+        self.coordinator.worker_state_updated.connect(self._on_worker_state_updated)
+        self.coordinator.worker_event_received.connect(self._on_worker_event_received)
+        self.coordinator.worker_command_failed.connect(self._on_worker_command_failed)
+
+    def _on_instruments_loaded(self, exchange: str, market_type: str) -> None:
+        if exchange != self._current_exchange_code() or market_type != "perpetual":
+            return
+        if self.coordinator is None:
+            return
+        items = self.coordinator.list_instrument_items(exchange, "perpetual")
+        self._display_to_symbol = {
+            str(item.get("display", "")).strip().upper(): str(item.get("symbol", "")).strip().upper()
+            for item in items
+            if str(item.get("display", "")).strip() and str(item.get("symbol", "")).strip()
+        }
+        self._symbols = list(self._display_to_symbol.keys())
+        self._symbol_model.setStringList(self._symbols[:50])
+
+    def _on_symbol_edited(self, text: str) -> None:
+        query = str(text or "").strip().upper()
+        if query:
+            starts = [item for item in self._symbols if item.startswith(query)]
+            contains = [item for item in self._symbols if query in item and not item.startswith(query)]
+            filtered = [*starts, *contains][:10]
+        else:
+            filtered = self._symbols[:10]
+        self._symbol_model.setStringList(filtered)
+        if filtered:
+            self._symbol_completer.complete()
+
+    def _on_symbol_selected(self, symbol: str) -> None:
+        self.symbol_input.setText(str(symbol or "").upper())
+        self._hide_completer()
+
+    def _hide_completer(self) -> None:
+        self._symbol_completer.popup().hide()
+
+    def _start_runtime(self) -> None:
+        if self.coordinator is None:
+            return
+        exchange_code = self._current_exchange_code()
+        credentials = self._load_connected_exchange_credentials(exchange_code)
+        if credentials is None:
+            self._append_log(tr("runtime.error.no_credentials"))
+            return
+        symbol = self.coordinator.resolve_instrument_symbol(exchange_code, "perpetual", self.symbol_input.text())
+        if not symbol:
+            self._append_log(tr("runtime.error.no_symbol"))
+            return
+        self._append_log(tr("runtime.log.starting", symbol=symbol))
+        self.action_triggered.emit("runtime:start")
+        self.coordinator.start_test_runtime_async(
+            worker_id=self.worker_id,
+            exchange=exchange_code,
+            market_type="perpetual",
+            symbol=symbol,
+            api_key=credentials["api_key"],
+            api_secret=credentials["api_secret"],
+            api_passphrase=credentials.get("api_passphrase", ""),
+            target_notional=self.notional_input.text().strip() or "10",
+        )
+
+    def _stop_runtime(self) -> None:
+        if self.coordinator is None:
+            return
+        self.coordinator.stop_test_runtime(self.worker_id)
+        self._append_log(tr("runtime.log.stopping"))
+        self.action_triggered.emit("runtime:stop")
+
+    def _submit_order(self, side: str) -> None:
+        if self.coordinator is None:
+            return
+        self.coordinator.submit_test_order_async(self.worker_id, side, submitted_at_ms=int(time.time() * 1000))
+        self._append_log(tr("runtime.log.order_sent", side=side))
+        self.action_triggered.emit(f"runtime:order:{side}")
+
+    def _on_worker_state_updated(self, worker_id: str, state: object) -> None:
+        if worker_id != self.worker_id or not isinstance(state, dict):
+            return
+        self._pending_state = dict(state)
+        if not self._ui_state_timer.isActive():
+            self._ui_state_timer.start()
+
+    def _flush_pending_state(self) -> None:
+        if self._pending_state is None:
+            self._ui_state_timer.stop()
+            return
+        state = self._pending_state
+        self._pending_state = None
+        self._render_worker_state(state)
+
+    def _render_worker_state(self, state: dict) -> None:
+        metrics = state.get("metrics", {}) if isinstance(state.get("metrics"), dict) else {}
+        self.status_value.setText(str(state.get("status", "-")))
+        if state.get("last_error"):
+            self._append_log(f"ERROR: {state.get('last_error')}")
+        self.bid_value.setText(str(metrics.get("bid") or "-"))
+        self.ask_value.setText(str(metrics.get("ask") or "-"))
+        self.order_status_value.setText(str(metrics.get("last_order_status") or metrics.get("last_order_ack_status") or "-"))
+        self.execution_value.setText(str(metrics.get("last_execution_type") or "-"))
+        fill_qty = str(metrics.get("last_fill_qty") or "-")
+        fill_price = str(metrics.get("last_fill_price") or "-")
+        self.fill_value.setText(f"{fill_qty} @ {fill_price}")
+        self.ack_latency_value.setText(self._format_latency(metrics.get("last_ack_latency_ms")))
+        self.click_to_send_latency_value.setText(self._format_latency(metrics.get("last_click_to_send_latency_ms")))
+        self.send_to_ack_latency_value.setText(self._format_latency(metrics.get("last_send_to_ack_latency_ms")))
+        self.first_event_latency_value.setText(self._format_latency(metrics.get("last_first_event_latency_ms")))
+        self.send_to_first_event_latency_value.setText(
+            self._format_latency(metrics.get("last_send_to_first_event_latency_ms"))
+        )
+        self.fill_latency_value.setText(self._format_latency(metrics.get("last_fill_latency_ms")))
+        self.send_to_fill_latency_value.setText(self._format_latency(metrics.get("last_send_to_fill_latency_ms")))
+        self._update_running_state(str(state.get("status", "")) == "running")
+
+    def _on_worker_event_received(self, worker_id: str, event: object) -> None:
+        if worker_id != self.worker_id or not isinstance(event, dict):
+            return
+        event_type = str(event.get("event_type", "event"))
+        payload = event.get("payload", {})
+        self._append_log(f"{event_type}: {payload}")
+
+    def _on_worker_command_failed(self, worker_id: str, message: str) -> None:
+        if worker_id != self.worker_id:
+            return
+        self._append_log(f"ERROR: {message}")
+
+    def _update_running_state(self, running: bool) -> None:
+        self._running = bool(running)
+        self.start_btn.setEnabled(not self._running)
+        self.stop_btn.setEnabled(self._running)
+        self.buy_btn.setEnabled(self._running)
+        self.sell_btn.setEnabled(self._running)
+
+    def _append_log(self, line: str) -> None:
+        self.log_output.appendPlainText(str(line))
+
+    @staticmethod
+    def _format_latency(value: object) -> str:
+        if value in (None, "", "-"):
+            return "-"
+        try:
+            return f"{int(value)} ms"
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _populate_exchange_options(self) -> None:
+        self.exchange_select.blockSignals(True)
+        self.exchange_select.clear()
+        if self.coordinator is not None:
+            self._exchange_items = list(self.coordinator.available_exchanges())
+        else:
+            self._exchange_items = [("binance", "Binance"), ("bybit", "Bybit")]
+        for exchange_code, title in self._exchange_items:
+            self.exchange_select.addItem(title, exchange_code)
+        self.exchange_select.blockSignals(False)
+
+    def _current_exchange_code(self) -> str:
+        return str(self.exchange_select.currentData() or "binance").strip().lower()
+
+    def _prefetch_current_exchange(self) -> None:
+        if self.coordinator is None:
+            return
+        self.coordinator.prefetch_market_type(self._current_exchange_code(), "perpetual")
+
+    def _on_exchange_changed(self, _index: int) -> None:
+        self.symbol_input.clear()
+        self._display_to_symbol = {}
+        self._symbols = []
+        self._symbol_model.setStringList([])
+        self._prefetch_current_exchange()
+        if self.coordinator is None:
+            return
+        items = self.coordinator.list_instrument_items(self._current_exchange_code(), "perpetual")
+        self._display_to_symbol = {
+            str(item.get("display", "")).strip().upper(): str(item.get("symbol", "")).strip().upper()
+            for item in items
+            if str(item.get("display", "")).strip() and str(item.get("symbol", "")).strip()
+        }
+        self._symbols = list(self._display_to_symbol.keys())
+        self._symbol_model.setStringList(self._symbols[:50])
+
+    @staticmethod
+    def _load_connected_exchange_credentials(exchange_code: str) -> dict | None:
+        for card in load_exchange_cards():
+            if str(card.get("exchange_code", "")).strip().lower() != str(exchange_code or "").strip().lower():
+                continue
+            if not bool(card.get("connected")):
+                continue
+            api_key = str(card.get("api_key", "")).strip()
+            api_secret = str(card.get("api_secret", "")).strip()
+            if api_key and api_secret:
+                return {
+                    "api_key": api_key,
+                    "api_secret": api_secret,
+                    "api_passphrase": str(card.get("api_passphrase", "")).strip(),
+                }
+        return None
+
+    @staticmethod
+    def _make_value_label() -> QLabel:
+        label = QLabel("-")
+        label.setObjectName("runtimeValue")
+        mono = QFont("Consolas")
+        mono.setPointSize(10)
+        mono.setWeight(QFont.Weight.DemiBold)
+        label.setFont(mono)
+        return label
+
+    @staticmethod
+    def _add_stat(layout: QGridLayout, row: int, title: str, value: QLabel) -> None:
+        title_label = QLabel(title)
+        title_label.setObjectName("runtimeStatTitle")
+        layout.addWidget(title_label, row, 0)
+        layout.addWidget(value, row, 1)
+
+    def retranslate_ui(self) -> None:
+        self.title_label.setText(tr("runtime.title"))
+        self.subtitle_label.setText(tr("runtime.subtitle"))
+        self.market_type_capsule.setText(tr("runtime.market_type"))
+        self.symbol_input.setPlaceholderText(tr("runtime.symbol_placeholder"))
+        self.notional_input.setPlaceholderText(tr("runtime.notional"))
+        self.start_btn.setText(tr("runtime.start"))
+        self.stop_btn.setText(tr("runtime.stop"))
+        self.buy_btn.setText(tr("runtime.buy"))
+        self.sell_btn.setText(tr("runtime.sell"))
+
+    def apply_theme(self) -> None:
+        self.setStyleSheet(
+            f"""
+            QFrame#runtimeHero, QFrame#runtimeStats {{
+                background-color: {theme_color('surface')};
+                border: 1px solid {theme_color('border')};
+                border-radius: 16px;
+            }}
+            QLabel#runtimeTitle {{
+                color: {theme_color('text_primary')};
+                font-size: 22px;
+                font-weight: 800;
+            }}
+            QLabel#runtimeSubtitle {{
+                color: {theme_color('text_muted')};
+                font-size: 12px;
+            }}
+            QLabel#runtimeCapsule {{
+                background-color: {theme_color('surface_alt')};
+                border: 1px solid {theme_color('border')};
+                border-radius: 10px;
+                padding: 7px 12px;
+                font-weight: 700;
+                color: {theme_color('text_primary')};
+            }}
+            QLineEdit#runtimeInput {{
+                background-color: {theme_color('window_bg')};
+                color: {theme_color('text_primary')};
+                border: 1px solid {theme_color('border')};
+                border-radius: 10px;
+                padding: 7px 10px;
+            }}
+            QComboBox#runtimeSelect {{
+                background-color: {theme_color('surface_alt')};
+                color: {theme_color('text_primary')};
+                border: 1px solid {theme_color('border')};
+                border-radius: 10px;
+                padding: 6px 10px;
+                font-weight: 700;
+                min-width: 112px;
+            }}
+            QComboBox#runtimeSelect::drop-down {{
+                width: 18px;
+                border: none;
+            }}
+            QComboBox#runtimeSelect QAbstractItemView {{
+                background-color: {theme_color('surface')};
+                color: {theme_color('text_primary')};
+                border: 1px solid {theme_color('border')};
+                selection-background-color: {theme_color('surface_alt')};
+            }}
+            QLabel#runtimeStatTitle {{
+                color: {theme_color('text_muted')};
+                font-size: 11px;
+                font-weight: 700;
+            }}
+            QLabel#runtimeValue {{
+                color: {theme_color('text_primary')};
+                font-size: 12px;
+                padding: 5px 8px;
+                background-color: {theme_color('window_bg')};
+                border: 1px solid {theme_color('border')};
+                border-radius: 10px;
+            }}
+            QPlainTextEdit#runtimeLog {{
+                background-color: {theme_color('surface')};
+                color: {theme_color('text_primary')};
+                border: 1px solid {theme_color('border')};
+                border-radius: 14px;
+                padding: 8px;
+            }}
+            """
+        )
+        self.start_btn.setStyleSheet(button_style("primary"))
+        self.stop_btn.setStyleSheet(button_style("secondary"))
+        self.buy_btn.setStyleSheet(button_style("success"))
+        self.sell_btn.setStyleSheet(button_style("warning"))

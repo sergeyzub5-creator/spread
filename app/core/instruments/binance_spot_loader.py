@@ -54,6 +54,6 @@ class BinanceSpotInstrumentLoader:
         routing = InstrumentRouting(
             ws_channel="bookTicker",
             ws_symbol=symbol.lower(),
-            order_route="order.place",
+            order_route="binance_spot_ws_api",
         )
         return InstrumentId(key=key, spec=spec, routing=routing)

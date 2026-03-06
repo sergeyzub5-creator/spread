@@ -60,6 +60,6 @@ class BinanceUsdmInstrumentLoader:
         routing = InstrumentRouting(
             ws_channel="bookTicker",
             ws_symbol=symbol.lower(),
-            order_route="order.place",
+            order_route="binance_usdm_trade_ws",
         )
         return InstrumentId(key=key, spec=spec, routing=routing)

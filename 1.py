@@ -4,15 +4,21 @@ from PySide6.QtWidgets import QApplication
 
 from app.core.events.bus import EventBus
 from app.core.instruments.registry import InstrumentRegistry
+from app.core.logging.logger_factory import get_logger, reset_session_trace_log, session_trace_log_path
 from app.core.market_data.service import MarketDataService
+from app.ui import AppWindow
 from app.core.workers.manager import WorkerManager
 from app.ui.coordinator import UiCoordinator
-from ui.theme import get_theme_manager
-from ui.window import AppWindow
-from ui.widgets.startup_splash import StartupSplash
+from app.ui.theme import get_theme_manager
+from app.ui.widgets.startup_splash import StartupSplash
 
 
 def main() -> int:
+    trace_path = reset_session_trace_log()
+    startup_logger = get_logger("app.startup")
+    startup_logger.info("session trace log reset | path=%s", trace_path)
+    startup_logger.info("session startup begin")
+
     app = QApplication(sys.argv)
     app.setApplicationName("Spread Sniper UI Shell")
     get_theme_manager().set_theme("dark")
@@ -33,6 +39,7 @@ def main() -> int:
     splash = StartupSplash()
     splash.finished.connect(window.show)
     splash.start()
+    startup_logger.info("ui startup complete | trace_log=%s", session_trace_log_path())
     return app.exec()
 
 

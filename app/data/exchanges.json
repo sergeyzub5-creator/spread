@@ -1,0 +1,24 @@
+{
+  "cards": [
+    {
+      "exchange_code": "binance",
+      "exchange_title": "Binance Futures",
+      "exchange_name": "Binance",
+      "api_key": "WynXIENvlNPKF918Yr9HKADFbLdViuqnbOw9XSLpKSagp2cnQ0EMiCRtusqEutZP",
+      "api_secret": "QDjIloMztioCGZDPI0V3ZynVx3eVpZtSYovJAvdkfdOi0QsRjHbuhzwvDeBv3zAg",
+      "api_passphrase": "",
+      "testnet": false,
+      "account_snapshot": {
+        "exchange": "binance",
+        "status_text": "Подключено · Spot + Futures",
+        "balance_text": "Баланс: 8.92 USDT",
+        "positions_text": "Позиции: 0",
+        "pnl_text": "PnL: 0.00 USDT",
+        "spot_enabled": true,
+        "futures_enabled": true,
+        "can_trade": true
+      },
+      "connected": true
+    }
+  ]
+}
