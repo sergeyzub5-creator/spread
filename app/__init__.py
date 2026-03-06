@@ -1,0 +1,1 @@
+"""New application architecture scaffold."""

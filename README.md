@@ -11,5 +11,5 @@ What is included:
 Run:
 
 ```powershell
-python main.py
+python 1.py
 ```

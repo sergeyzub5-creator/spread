@@ -17,6 +17,13 @@ THEMES = {
         "success": "#7ec8a6",
         "warning": "#e5c07b",
         "danger": "#e06c75",
+        "success_bg": "rgba(38, 72, 58, 0.88)",
+        "net_idle": "#64748b",
+        "net_idle_border": "#94a3b8",
+        "net_online": "#34d399",
+        "net_online_border": "#10b981",
+        "net_offline": "#fb7185",
+        "net_offline_border": "#e11d48",
         "selection_bg_soft": "rgba(42, 58, 90, 72)",
         "tab_selected_bg": "rgba(20, 24, 28, 128)",
         "glow_a": "#19B8FF",
@@ -35,6 +42,13 @@ THEMES = {
         "success": "#69a997",
         "warning": "#b49a69",
         "danger": "#c2868e",
+        "success_bg": "rgba(48, 84, 74, 0.82)",
+        "net_idle": "#7e8a98",
+        "net_idle_border": "#a9b4c4",
+        "net_online": "#79d1b2",
+        "net_online_border": "#58b899",
+        "net_offline": "#d58c97",
+        "net_offline_border": "#c56b7a",
         "selection_bg_soft": "rgba(146, 160, 180, 38)",
         "tab_selected_bg": "rgba(78, 86, 98, 156)",
         "glow_a": "#6cb7ff",
@@ -53,6 +67,13 @@ THEMES = {
         "success": "#418f7e",
         "warning": "#9f7633",
         "danger": "#b56a74",
+        "success_bg": "rgba(123, 169, 152, 0.32)",
+        "net_idle": "#758293",
+        "net_idle_border": "#4d596c",
+        "net_online": "#2f9f88",
+        "net_online_border": "#227a68",
+        "net_offline": "#c45d6b",
+        "net_offline_border": "#a54655",
         "selection_bg_soft": "rgba(76, 121, 189, 48)",
         "tab_selected_bg": "rgba(76, 121, 189, 102)",
         "glow_a": "#2f7de1",
@@ -148,15 +169,19 @@ def build_app_stylesheet() -> str:
             background-color: {c['surface']};
             border: 1px solid {c['border']};
             border-radius: 8px;
-            padding: 6px;
+            padding: 4px;
         }}
         QMenu::item {{
-            padding: 6px 10px;
+            padding: 4px 9px;
             border-radius: 6px;
         }}
         QMenu::item:selected {{
             background-color: {c['selection_bg_soft']};
             color: {c['accent']};
+        }}
+        QToolButton::menu-indicator {{
+            image: none;
+            width: 0px;
         }}
     """
 

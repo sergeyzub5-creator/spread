@@ -1,0 +1,36 @@
+from __future__ import annotations
+
+from app.core.events.bus import EventBus
+from app.core.logging.logger_factory import get_logger
+from app.core.market_data.service import MarketDataService
+from app.core.models.workers import WorkerTask
+from app.core.workers.runtime import WorkerRuntime
+
+
+class WorkerManager:
+    """Lifecycle manager for worker runtimes keyed by worker_id."""
+
+    def __init__(self, market_data_service: MarketDataService, event_bus: EventBus) -> None:
+        self.market_data_service = market_data_service
+        self.event_bus = event_bus
+        self.logger = get_logger("workers.manager")
+        self._workers: dict[str, WorkerRuntime] = {}
+
+    def create_worker(self, task: WorkerTask) -> WorkerRuntime:
+        runtime = WorkerRuntime(task=task, market_data_service=self.market_data_service, event_bus=self.event_bus)
+        self._workers[task.worker_id] = runtime
+        return runtime
+
+    def start_worker(self, task: WorkerTask) -> WorkerRuntime:
+        runtime = self.create_worker(task)
+        runtime.start()
+        return runtime
+
+    def stop_worker(self, worker_id: str) -> None:
+        runtime = self._workers.get(worker_id)
+        if runtime is None:
+            return
+        runtime.stop()
+
+    def get_worker(self, worker_id: str) -> WorkerRuntime | None:
+        return self._workers.get(worker_id)
