@@ -400,22 +400,48 @@ class SpreadMockTab(QWidget):
             capsule_layout = QHBoxLayout(capsule)
             capsule_layout.setContentsMargins(8, 6, 8, 6)
             capsule_layout.setSpacing(0)
-            price = QLabel(tr("spread.bid") if side_name == "bid" else tr("spread.ask"))
-            price.setObjectName("bidPriceText" if side_name == "bid" else "askPriceText")
-            price.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-            price.setContentsMargins(8, 0, 8, 0)
+
+            price_block = QWidget()
+            price_block_layout = QHBoxLayout(price_block)
+            price_block_layout.setContentsMargins(8, 0, 8, 0)
+            price_block_layout.setSpacing(6)
+            price_prefix = QLabel(tr("spread.bid") if side_name == "bid" else tr("spread.ask"))
+            price_prefix.setObjectName("bidLabelText" if side_name == "bid" else "askLabelText")
+            price_prefix.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            price_prefix.setFixedWidth(32)
+            price_value = QLabel("—")
+            price_value.setObjectName("quoteValueText")
+            price_value.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            price_value.setMinimumWidth(64)
+            price_block_layout.addWidget(price_prefix, 0)
+            price_block_layout.addWidget(price_value, 1)
+
             divider = QFrame()
             divider.setObjectName("quoteMidDivider")
             divider.setFixedWidth(1)
-            qty = QLabel(tr("spread.qty"))
-            qty.setObjectName("quoteQtyText")
-            qty.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
-            qty.setContentsMargins(8, 0, 8, 0)
-            labels[f"{side_name}_price"] = price
-            labels[f"{side_name}_qty"] = qty
-            capsule_layout.addWidget(price, 1)
+
+            qty_block = QWidget()
+            qty_block_layout = QHBoxLayout(qty_block)
+            qty_block_layout.setContentsMargins(8, 0, 8, 0)
+            qty_block_layout.setSpacing(6)
+            qty_prefix = QLabel(tr("spread.qty"))
+            qty_prefix.setObjectName("quoteQtyLabelText")
+            qty_prefix.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            qty_prefix.setFixedWidth(50)
+            qty_value = QLabel("— USDT")
+            qty_value.setObjectName("quoteValueText")
+            qty_value.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+            qty_value.setMinimumWidth(92)
+            qty_block_layout.addWidget(qty_prefix, 0)
+            qty_block_layout.addWidget(qty_value, 1)
+
+            labels[f"{side_name}_price_prefix"] = price_prefix
+            labels[f"{side_name}_price"] = price_value
+            labels[f"{side_name}_qty_prefix"] = qty_prefix
+            labels[f"{side_name}_qty"] = qty_value
+            capsule_layout.addWidget(price_block, 1)
             capsule_layout.addWidget(divider, 0)
-            capsule_layout.addWidget(qty, 1)
+            capsule_layout.addWidget(qty_block, 1)
             row.addWidget(capsule, 1)
         self._quote_labels[slot_name] = labels
         return panel
@@ -599,10 +625,14 @@ class SpreadMockTab(QWidget):
         labels = self._quote_labels.get(slot_name)
         if labels is None:
             return
-        labels["bid_price"].setText(tr("spread.bid"))
-        labels["ask_price"].setText(tr("spread.ask"))
-        labels["bid_qty"].setText(tr("spread.qty"))
-        labels["ask_qty"].setText(tr("spread.qty"))
+        labels["bid_price_prefix"].setText(tr("spread.bid"))
+        labels["ask_price_prefix"].setText(tr("spread.ask"))
+        labels["bid_qty_prefix"].setText(tr("spread.qty"))
+        labels["ask_qty_prefix"].setText(tr("spread.qty"))
+        labels["bid_price"].setText("—")
+        labels["ask_price"].setText("—")
+        labels["bid_qty"].setText("— USDT")
+        labels["ask_qty"].setText("— USDT")
 
     def _on_public_quote_received(self, slot_name: str, quote_data: object) -> None:
         if not isinstance(quote_data, dict):
@@ -614,10 +644,10 @@ class SpreadMockTab(QWidget):
         ask_price = quote_data.get("ask", "--")
         bid_qty = quote_data.get("bid_qty", "--")
         ask_qty = quote_data.get("ask_qty", "--")
-        labels["bid_price"].setText(tr("spread.bid_value", value=bid_price))
-        labels["ask_price"].setText(tr("spread.ask_value", value=ask_price))
-        labels["bid_qty"].setText(tr("spread.qty_value", value=self._format_ui_notional_usdt(bid_price, bid_qty)))
-        labels["ask_qty"].setText(tr("spread.qty_value", value=self._format_ui_notional_usdt(ask_price, ask_qty)))
+        labels["bid_price"].setText(str(bid_price))
+        labels["ask_price"].setText(str(ask_price))
+        labels["bid_qty"].setText(f"{self._format_ui_notional_usdt(bid_price, bid_qty)} USDT")
+        labels["ask_qty"].setText(f"{self._format_ui_notional_usdt(ask_price, ask_qty)} USDT")
         if self._spread_value_label is not None:
             left = self._slot_state["left"]["symbol"]
             right = self._slot_state["right"]["symbol"]
@@ -861,24 +891,28 @@ class SpreadMockTab(QWidget):
                 font-size: 56px;
                 font-weight: 800;
             }}
-            QLabel#bidPriceText {{
+            QLabel#bidLabelText {{
                 color: {theme_color('success')};
                 font-size: 11px;
                 font-weight: 700;
-                font-family: "Consolas";
             }}
-            QLabel#askPriceText {{
+            QLabel#askLabelText {{
                 color: {theme_color('danger')};
                 font-size: 11px;
                 font-weight: 700;
-                font-family: "Consolas";
             }}
-            QLabel#quoteQtyText {{
+            QLabel#quoteQtyLabelText {{
                 color: {c_primary};
                 font-size: 11px;
                 font-weight: 700;
-                padding-right: 1px;
+                padding-left: 1px;
+            }}
+            QLabel#quoteValueText {{
+                color: {c_primary};
+                font-size: 11px;
+                font-weight: 700;
                 font-family: "Consolas";
+                padding-right: 6px;
             }}
             QFrame#strategyPanel {{
                 background-color: {self._rgba(c_surface, 0.72)};

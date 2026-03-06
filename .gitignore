@@ -9,3 +9,4 @@ __pycache__/
 
 *.log
 data/ui_state.json
+data/exchanges.json

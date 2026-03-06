@@ -4,6 +4,7 @@ import threading
 
 from PySide6.QtCore import QObject, Signal
 
+from app.core.accounts.binance_account_connector import BinanceAccountConnector
 from app.core.events.bus import EventBus
 from app.core.instruments.binance_spot_loader import BinanceSpotInstrumentLoader
 from app.core.instruments.binance_usdm_loader import BinanceUsdmInstrumentLoader
@@ -13,6 +14,7 @@ from app.core.market_data.binance_spot_normalizer import BinanceSpotQuoteNormali
 from app.core.market_data.binance_usdm_connector import BinanceUsdmPublicConnector
 from app.core.market_data.binance_usdm_normalizer import BinanceUsdmQuoteNormalizer
 from app.core.market_data.service import MarketDataService
+from app.core.models.account import ExchangeCredentials
 from app.core.models.market_data import QuoteL1
 from app.core.models.instrument_types import UI_INSTRUMENT_TYPE_LABELS, UiInstrumentType
 from app.core.workers.manager import WorkerManager
@@ -25,6 +27,12 @@ class UiCoordinator(QObject):
     public_quote_error = Signal(str)
     instruments_loaded = Signal(str, str)
     instruments_load_failed = Signal(str, str, str)
+    exchange_connect_started = Signal(str, str)
+    exchange_connect_succeeded = Signal(str, str, object)
+    exchange_connect_failed = Signal(str, str, str)
+    exchange_close_positions_started = Signal(str, str)
+    exchange_close_positions_succeeded = Signal(str, str, object)
+    exchange_close_positions_failed = Signal(str, str, str)
 
     def __init__(
         self,
@@ -40,6 +48,7 @@ class UiCoordinator(QObject):
         self.event_bus = event_bus
         self._binance_spot_loader = BinanceSpotInstrumentLoader()
         self._binance_loader = BinanceUsdmInstrumentLoader()
+        self._binance_account_connector = BinanceAccountConnector()
         self._binance_spot_loaded = False
         self._binance_perp_loaded = False
         self._loading_market_types: set[tuple[str, str]] = set()
@@ -105,12 +114,68 @@ class UiCoordinator(QObject):
         instrument, callback = previous
         self.market_data_service.unsubscribe_l1(instrument, callback)
 
+    def connect_exchange_async(self, request_id: str, exchange: str, params: dict) -> None:
+        exchange_code = str(exchange or "").strip().lower()
+        self.exchange_connect_started.emit(request_id, exchange_code)
+
+        def _run() -> None:
+            try:
+                snapshot = self._connect_exchange(exchange_code, params)
+                self.exchange_connect_succeeded.emit(request_id, exchange_code, snapshot.to_dict())
+            except Exception as exc:
+                self.exchange_connect_failed.emit(request_id, exchange_code, str(exc))
+
+        threading.Thread(
+            target=_run,
+            name=f"exchange-connect-{exchange_code}",
+            daemon=True,
+        ).start()
+
+    def close_exchange_positions_async(self, request_id: str, exchange: str, params: dict) -> None:
+        exchange_code = str(exchange or "").strip().lower()
+        self.exchange_close_positions_started.emit(request_id, exchange_code)
+
+        def _run() -> None:
+            try:
+                result = self._close_exchange_positions(exchange_code, params)
+                self.exchange_close_positions_succeeded.emit(request_id, exchange_code, result.to_dict())
+            except Exception as exc:
+                self.exchange_close_positions_failed.emit(request_id, exchange_code, str(exc))
+
+        threading.Thread(
+            target=_run,
+            name=f"exchange-close-positions-{exchange_code}",
+            daemon=True,
+        ).start()
+
     def prefetch_exchange_instruments(self, exchange: str) -> None:
         for market_type, _title in self.list_market_types(exchange):
             self._prefetch_market_type(exchange, market_type)
 
     def prefetch_market_type(self, exchange: str, market_type: str) -> None:
         self._prefetch_market_type(exchange, market_type)
+
+    def _connect_exchange(self, exchange: str, params: dict):
+        if exchange != "binance":
+            raise ValueError(f"Unsupported exchange: {exchange}")
+        credentials = ExchangeCredentials(
+            exchange=exchange,
+            api_key=str(params.get("api_key", "")),
+            api_secret=str(params.get("api_secret", "")),
+            api_passphrase=str(params.get("api_passphrase", "")),
+        )
+        return self._binance_account_connector.connect(credentials)
+
+    def _close_exchange_positions(self, exchange: str, params: dict):
+        if exchange != "binance":
+            raise ValueError(f"Unsupported exchange: {exchange}")
+        credentials = ExchangeCredentials(
+            exchange=exchange,
+            api_key=str(params.get("api_key", "")),
+            api_secret=str(params.get("api_secret", "")),
+            api_passphrase=str(params.get("api_passphrase", "")),
+        )
+        return self._binance_account_connector.close_all_positions(credentials)
 
     def _ensure_exchange_loaded(self, exchange: str) -> None:
         if exchange == "binance":

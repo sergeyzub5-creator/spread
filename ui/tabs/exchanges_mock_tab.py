@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from ui.exchange_catalog import get_exchange_meta
+from ui.exchange_store import load_exchange_cards, save_exchange_cards
 from ui.i18n import tr
 from ui.theme import theme_color
 from ui.widgets.add_exchange_dialog import AddExchangeDialog
@@ -14,12 +17,21 @@ from ui.widgets.exchange_picker_dialog import ExchangePickerDialog
 class ExchangesMockTab(QWidget):
     action_triggered = Signal(str)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, coordinator=None, parent=None) -> None:
         super().__init__(parent)
+        self.coordinator = coordinator
         self.cards: list[ExchangeCardMock] = []
+        self._connect_requests: dict[str, ExchangeCardMock] = {}
+        self._close_requests: dict[str, ExchangeCardMock] = {}
         self._build_ui()
         self.apply_theme()
         self.retranslate_ui()
+        if self.coordinator is not None:
+            self.coordinator.exchange_connect_succeeded.connect(self._on_exchange_connect_succeeded)
+            self.coordinator.exchange_connect_failed.connect(self._on_exchange_connect_failed)
+            self.coordinator.exchange_close_positions_succeeded.connect(self._on_exchange_close_positions_succeeded)
+            self.coordinator.exchange_close_positions_failed.connect(self._on_exchange_close_positions_failed)
+        self._restore_cards()
 
     @staticmethod
     def _rgba(hex_color: str, alpha: float) -> str:
@@ -88,7 +100,7 @@ class ExchangesMockTab(QWidget):
         self.add_btn.clicked.connect(self._open_add_dialog)
         self.connect_all_btn.clicked.connect(self._connect_all_cards)
         self.disconnect_all_btn.clicked.connect(self._disconnect_all_cards)
-        self.close_all_positions_btn.clicked.connect(lambda: self.action_triggered.emit("close_all_positions"))
+        self.close_all_positions_btn.clicked.connect(self._close_all_positions)
         controls.addWidget(self.add_btn)
         controls.addStretch(1)
         controls.addWidget(self.connect_all_btn)
@@ -113,9 +125,9 @@ class ExchangesMockTab(QWidget):
         self._update_content_visibility()
 
     def _wire_card(self, card: ExchangeCardMock) -> None:
-        card.connect_clicked.connect(lambda exchange_name, _params: self.action_triggered.emit(f"{exchange_name}:connect"))
+        card.connect_clicked.connect(lambda _exchange_name, params, target=card: self._connect_card(target, params))
         card.disconnect_clicked.connect(self._handle_disconnect)
-        card.close_positions_clicked.connect(lambda exchange_name: self.action_triggered.emit(f"{exchange_name}:close_positions"))
+        card.close_positions_clicked.connect(lambda _exchange_name, target=card: self._close_card_positions(target))
         card.remove_clicked.connect(self._handle_remove)
         card.cancel_clicked.connect(lambda: self.action_triggered.emit("cancel_new_exchange"))
         card.edit_clicked.connect(lambda exchange_name: self.action_triggered.emit(f"{exchange_name}:edit"))
@@ -124,7 +136,11 @@ class ExchangesMockTab(QWidget):
         meta = get_exchange_meta(exchange_code)
         card = ExchangeCardMock(meta["base_name"], exchange_code)
         card.load_saved_data(payload)
-        card.mark_connected(True, demo=bool(payload.get("testnet", False)))
+        card._stored_payload = dict(payload)
+        snapshot = payload.get("account_snapshot")
+        if isinstance(snapshot, dict):
+            card.apply_account_snapshot(snapshot)
+        card.mark_connected(bool(payload.get("connected", True)), demo=bool(payload.get("testnet", False)))
         self._wire_card(card)
         self.cards.append(card)
         self.panels_layout.insertWidget(self.panels_layout.count() - 1, card)
@@ -136,18 +152,54 @@ class ExchangesMockTab(QWidget):
         if picker.exec() != picker.DialogCode.Accepted or not picker.selected_code:
             return
 
-        dialog = AddExchangeDialog(picker.selected_code, self)
+        dialog = AddExchangeDialog(picker.selected_code, coordinator=self.coordinator, parent=self)
         if dialog.exec() != dialog.DialogCode.Accepted or not isinstance(dialog.payload, dict):
             return
 
         self._create_card(picker.selected_code, dialog.payload)
+        self._save_cards()
         self.action_triggered.emit(f"{picker.selected_code}:added")
+
+    def _connect_card(self, card: ExchangeCardMock, params: dict) -> None:
+        if self.coordinator is None:
+            card.mark_connected(True)
+            self.action_triggered.emit(f"{card.exchange_name}:connect")
+            return
+        request_id = uuid4().hex
+        self._connect_requests[request_id] = card
+        card.set_busy(True)
+        self.coordinator.connect_exchange_async(request_id, card.exchange_type, params)
+
+    @staticmethod
+    def _card_credentials(card: ExchangeCardMock) -> dict:
+        return {
+            "api_key": card.api_key_input.text().strip(),
+            "api_secret": card.api_secret_input.text().strip(),
+            "api_passphrase": card.passphrase_input.text().strip(),
+            "testnet": False,
+        }
+
+    def _close_card_positions(self, card: ExchangeCardMock) -> None:
+        if self.coordinator is None or not card.is_connected:
+            return
+        params = self._card_credentials(card)
+        if not params["api_key"] or not params["api_secret"]:
+            card.show_operation_error(tr("exchange.error.key_secret_required"))
+            return
+        request_id = uuid4().hex
+        self._close_requests[request_id] = card
+        card.set_busy_mode("close_positions")
+        self.coordinator.close_exchange_positions_async(request_id, card.exchange_type, params)
 
     def _handle_disconnect(self, exchange_name: str) -> None:
         for card in self.cards:
             if card.exchange_name == exchange_name:
                 card.mark_connected(False)
+                stored = getattr(card, "_stored_payload", {})
+                stored["connected"] = False
+                card._stored_payload = stored
                 break
+        self._save_cards()
         self.action_triggered.emit(f"{exchange_name}:disconnect")
 
     def _handle_remove(self, exchange_name: str) -> None:
@@ -160,16 +212,107 @@ class ExchangesMockTab(QWidget):
             self.action_triggered.emit(f"{exchange_name}:remove")
             break
         self._update_content_visibility()
+        self._save_cards()
 
     def _connect_all_cards(self) -> None:
         for card in self.cards:
-            card.mark_connected(True, demo=card.testnet_check.isChecked())
+            params = self._card_credentials(card)
+            self._connect_card(card, params)
         self.action_triggered.emit("connect_all")
 
     def _disconnect_all_cards(self) -> None:
         for card in self.cards:
             card.mark_connected(False)
+        self._save_cards()
         self.action_triggered.emit("disconnect_all")
+
+    def _close_all_positions(self) -> None:
+        for card in self.cards:
+            if card.is_connected:
+                self._close_card_positions(card)
+        self.action_triggered.emit("close_all_positions")
+
+    def _on_exchange_connect_succeeded(self, request_id: str, exchange_code: str, snapshot: object) -> None:
+        card = self._connect_requests.pop(request_id, None)
+        if card is None or card.exchange_type != exchange_code or not isinstance(snapshot, dict):
+            return
+        card.apply_account_snapshot(snapshot)
+        card.mark_connected(True)
+        stored = dict(getattr(card, "_stored_payload", {}))
+        stored["exchange_code"] = card.exchange_type
+        stored["exchange_title"] = card.exchange_meta["title"]
+        stored["exchange_name"] = card.exchange_meta["base_name"]
+        stored["api_key"] = card.api_key_input.text().strip()
+        stored["api_secret"] = card.api_secret_input.text().strip()
+        stored["api_passphrase"] = card.passphrase_input.text().strip()
+        stored["testnet"] = False
+        stored["connected"] = True
+        stored["account_snapshot"] = snapshot
+        card._stored_payload = stored
+        self._save_cards()
+        self.action_triggered.emit(f"{card.exchange_name}:connect")
+
+    def _on_exchange_connect_failed(self, request_id: str, exchange_code: str, message: str) -> None:
+        card = self._connect_requests.pop(request_id, None)
+        if card is None or card.exchange_type != exchange_code:
+            return
+        card.show_connection_error(message)
+
+    def _on_exchange_close_positions_succeeded(self, request_id: str, exchange_code: str, payload: object) -> None:
+        card = self._close_requests.pop(request_id, None)
+        if card is None or card.exchange_type != exchange_code or not isinstance(payload, dict):
+            return
+        snapshot = payload.get("account_snapshot")
+        if isinstance(snapshot, dict):
+            card.apply_account_snapshot(snapshot)
+        card.mark_connected(True)
+        stored = dict(getattr(card, "_stored_payload", {}))
+        stored["connected"] = True
+        if isinstance(snapshot, dict):
+            stored["account_snapshot"] = snapshot
+        card._stored_payload = stored
+        self._save_cards()
+        self.action_triggered.emit(f"{card.exchange_name}:close_positions")
+
+    def _on_exchange_close_positions_failed(self, request_id: str, exchange_code: str, message: str) -> None:
+        card = self._close_requests.pop(request_id, None)
+        if card is None or card.exchange_type != exchange_code:
+            return
+        card.show_operation_error(message)
+
+    def _serialize_card(self, card: ExchangeCardMock) -> dict:
+        stored = dict(getattr(card, "_stored_payload", {}))
+        stored["exchange_code"] = card.exchange_type
+        stored["exchange_title"] = card.exchange_meta["title"]
+        stored["exchange_name"] = card.exchange_meta["base_name"]
+        stored["api_key"] = card.api_key_input.text().strip()
+        stored["api_secret"] = card.api_secret_input.text().strip()
+        stored["api_passphrase"] = card.passphrase_input.text().strip()
+        stored["testnet"] = False
+        stored["connected"] = bool(card.is_connected)
+        if isinstance(card._snapshot, dict):
+            stored["account_snapshot"] = dict(card._snapshot)
+        return stored
+
+    def _save_cards(self) -> None:
+        save_exchange_cards([self._serialize_card(card) for card in self.cards])
+
+    def _restore_cards(self) -> None:
+        for payload in load_exchange_cards():
+            exchange_code = str(payload.get("exchange_code", "")).strip().lower()
+            if not exchange_code:
+                continue
+            self._create_card(exchange_code, payload)
+            if bool(payload.get("connected")):
+                card = self.cards[-1]
+                params = {
+                    "api_key": str(payload.get("api_key", "")).strip(),
+                    "api_secret": str(payload.get("api_secret", "")).strip(),
+                    "api_passphrase": str(payload.get("api_passphrase", "")).strip(),
+                    "testnet": False,
+                }
+                if params["api_key"] and params["api_secret"]:
+                    self._connect_card(card, params)
 
     def _update_content_visibility(self) -> None:
         has_cards = bool(self.cards)

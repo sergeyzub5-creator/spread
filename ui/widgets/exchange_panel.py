@@ -48,6 +48,10 @@ class ExchangePanel(QFrame):
         self.testnet = False
         self.is_new = is_new
         self.edit_mode = is_new
+        self._busy = False
+        self._busy_mode: str | None = None
+        self._snapshot: dict | None = None
+        self._last_error_message: str | None = None
 
         self._init_ui()
         self.apply_theme()
@@ -138,7 +142,7 @@ class ExchangePanel(QFrame):
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setSpacing(5 if self.is_new else 6)
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
@@ -151,6 +155,9 @@ class ExchangePanel(QFrame):
 
         self.name_label = QLabel(self.exchange_name)
         self.name_label.setMinimumWidth(84)
+        self.name_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.name_label.setMaximumHeight(24)
+        self.name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.status_label = QLabel()
         self.status_indicator = StatusDot()
@@ -172,47 +179,20 @@ class ExchangePanel(QFrame):
         layout.addLayout(header)
 
         self.stats_widget = QWidget()
-        stats_layout = QHBoxLayout(self.stats_widget)
-        stats_layout.setContentsMargins(0, 0, 0, 0)
-        stats_layout.setSpacing(8)
+        self.stats_layout = QHBoxLayout(self.stats_widget)
+        self.stats_layout.setContentsMargins(0, 0, 0, 0)
+        self.stats_layout.setSpacing(6 if self.is_new else 8)
         self.balance_label = QLabel()
         self.positions_label = QLabel()
         self.pnl_label = QLabel()
         for label in (self.balance_label, self.positions_label, self.pnl_label):
             label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
             label.setMinimumHeight(28)
-            stats_layout.addWidget(label)
-        stats_layout.addStretch()
-        layout.addWidget(self.stats_widget)
-
-        self.api_group = QGroupBox()
-        api_layout = QHBoxLayout()
-        api_layout.setSpacing(5)
-
-        self.api_key_input = QLineEdit()
-        self.api_key_input.setPlaceholderText("")
-        self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_key_input.setMinimumWidth(180)
-
-        self.api_secret_input = QLineEdit()
-        self.api_secret_input.setPlaceholderText("")
-        self.api_secret_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_secret_input.setMinimumWidth(180)
-
-        self.passphrase_input = QLineEdit()
-        self.passphrase_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.passphrase_input.setMinimumWidth(120)
-
-        api_layout.addWidget(self.api_key_input)
-        api_layout.addWidget(self.api_secret_input)
-        api_layout.addWidget(self.passphrase_input)
-        api_layout.addStretch()
-        self.api_group.setLayout(api_layout)
-        layout.addWidget(self.api_group)
-
-        button_layout = QHBoxLayout()
-        button_layout.setContentsMargins(0, 0, 0, 0)
-        button_layout.setSpacing(6)
+            label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            self.stats_layout.addWidget(label)
+        self.stats_layout.setStretch(0, 2)
+        self.stats_layout.setStretch(1, 2)
+        self.stats_layout.setStretch(2, 2)
 
         self.connect_btn = QPushButton()
         self.connect_btn.setMinimumWidth(100)
@@ -238,17 +218,60 @@ class ExchangePanel(QFrame):
         self.remove_btn.setMinimumWidth(100)
         self.remove_btn.clicked.connect(lambda: self.remove_clicked.emit(self.exchange_name))
 
+        self.stats_actions_spacer = QWidget()
+        self.stats_actions_spacer.setFixedWidth(22)
+        self.stats_actions_spacer.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.stats_layout.addWidget(self.stats_actions_spacer)
         for button in (
             self.connect_btn,
             self.disconnect_btn,
             self.close_positions_btn,
             self.edit_btn,
             self.cancel_btn,
-            self.remove_btn,
         ):
-            button_layout.addWidget(button)
-        button_layout.addStretch()
-        layout.addLayout(button_layout)
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            self.stats_layout.addWidget(button)
+        self.stats_layout.addStretch(1)
+        self.remove_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.stats_layout.addWidget(self.remove_btn)
+        layout.addWidget(self.stats_widget)
+
+        self.api_group = QGroupBox()
+        api_layout = QHBoxLayout()
+        api_layout.setSpacing(4 if self.is_new else 5)
+        if self.is_new:
+            api_layout.setContentsMargins(0, 2, 0, 0)
+
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setPlaceholderText("")
+        self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key_input.setMinimumWidth(150 if self.is_new else 180)
+        self.api_key_input.setMinimumHeight(32 if self.is_new else 0)
+
+        self.api_secret_input = QLineEdit()
+        self.api_secret_input.setPlaceholderText("")
+        self.api_secret_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_secret_input.setMinimumWidth(150 if self.is_new else 180)
+        self.api_secret_input.setMinimumHeight(32 if self.is_new else 0)
+
+        self.passphrase_input = QLineEdit()
+        self.passphrase_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.passphrase_input.setMinimumWidth(98 if self.is_new else 120)
+        self.passphrase_input.setMinimumHeight(32 if self.is_new else 0)
+
+        api_layout.addWidget(self.api_key_input)
+        api_layout.addWidget(self.api_secret_input)
+        api_layout.addWidget(self.passphrase_input)
+        api_layout.addStretch()
+        self.api_group.setLayout(api_layout)
+        layout.addWidget(self.api_group)
+
+        self.form_actions_widget = QWidget()
+        self.form_actions_layout = QHBoxLayout(self.form_actions_widget)
+        self.form_actions_layout.setContentsMargins(0, 4 if self.is_new else 0, 0, 0)
+        self.form_actions_layout.setSpacing(6 if self.is_new else 6)
+        self.form_actions_widget.setVisible(False)
+        layout.addWidget(self.form_actions_widget)
 
         self._update_passphrase_hint()
         self._configure_new_mode()
@@ -257,9 +280,22 @@ class ExchangePanel(QFrame):
         if not self.is_new:
             return
         self.stats_widget.setVisible(False)
-        self.name_label.setVisible(False)
-        self.icon_label.setFixedSize(52, 52)
-        self.icon_label.setPixmap(build_exchange_pixmap(self.exchange_type, size=52))
+        self.balance_label.setVisible(False)
+        self.positions_label.setVisible(False)
+        self.pnl_label.setVisible(False)
+        self.stats_actions_spacer.setVisible(False)
+        self.stats_layout.removeWidget(self.connect_btn)
+        self.stats_layout.removeWidget(self.cancel_btn)
+        self.connect_btn.setMinimumWidth(108)
+        self.cancel_btn.setMinimumWidth(96)
+        self.form_actions_layout.addWidget(self.connect_btn)
+        self.form_actions_layout.addWidget(self.cancel_btn)
+        self.form_actions_layout.addStretch(1)
+        self.form_actions_widget.setVisible(True)
+        self.icon_label.setFixedSize(44, 44)
+        self.icon_label.setPixmap(build_exchange_pixmap(self.exchange_type, size=44))
+        self.name_label.setVisible(True)
+        self.name_label.setMinimumWidth(0)
         self.status_label.clear()
         self.status_label.setVisible(False)
         self.status_indicator.setVisible(False)
@@ -272,16 +308,63 @@ class ExchangePanel(QFrame):
             self.passphrase_input.setPlaceholderText(tr("exchange.passphrase_optional"))
 
     def _update_ui_state(self) -> None:
+        if self._busy:
+            self._last_error_message = None
+            if self._busy_mode == "close_positions":
+                self._set_status_view(tr("exchange.status.closing_positions"), "warning", "#f59e0b", "#d97706")
+                self.connect_btn.setVisible(False)
+                self.disconnect_btn.setVisible(True)
+                self.close_positions_btn.setVisible(True)
+                self.edit_btn.setVisible(False)
+                self.cancel_btn.setVisible(False)
+                self.api_group.setVisible(False)
+                self.remove_btn.setVisible(True)
+                self.connect_btn.setEnabled(False)
+                self.cancel_btn.setEnabled(False)
+                self.edit_btn.setEnabled(False)
+                self.disconnect_btn.setEnabled(False)
+                self.close_positions_btn.setEnabled(False)
+                self.remove_btn.setEnabled(False)
+                if isinstance(self._snapshot, dict):
+                    self.balance_label.setText(str(self._snapshot.get("balance_text", tr("exchange.balance"))))
+                    self.positions_label.setText(str(self._snapshot.get("positions_text", tr("exchange.positions"))))
+                    self.pnl_label.setText(str(self._snapshot.get("pnl_text", tr("exchange.pnl"))))
+                return
+
+            self._set_status_view(tr("exchange.status.connecting"), "accent", "#60a5fa", "#3b82f6")
+            self.connect_btn.setVisible(True)
+            self.disconnect_btn.setVisible(False)
+            self.close_positions_btn.setVisible(False)
+            self.edit_btn.setVisible(False)
+            self.cancel_btn.setVisible(not self.is_new)
+            self.api_group.setVisible(self.is_new or self.edit_mode)
+            self.remove_btn.setVisible(not self.is_new)
+            self.connect_btn.setEnabled(False)
+            self.cancel_btn.setEnabled(False)
+            self.edit_btn.setEnabled(False)
+            self.remove_btn.setEnabled(False)
+            return
+
         if self.is_connected:
-            self._set_status_view(tr("exchange.status.connected"), "success", "#22c55e", "#16a34a")
+            if self._last_error_message:
+                self._set_status_view(self._last_error_message, "danger", "#ef4444", "#dc2626")
+            else:
+                status_text = str(self._snapshot.get("status_text", tr("exchange.status.connected"))) if isinstance(self._snapshot, dict) else tr("exchange.status.connected")
+                self._set_status_view(status_text, "success", "#22c55e", "#16a34a")
             self.connect_btn.setVisible(False)
             self.disconnect_btn.setVisible(True)
             self.close_positions_btn.setVisible(True)
             self.edit_btn.setVisible(False)
             self.cancel_btn.setVisible(False)
             self.api_group.setVisible(False)
+            if isinstance(self._snapshot, dict):
+                self.balance_label.setText(str(self._snapshot.get("balance_text", tr("exchange.balance"))))
+                self.positions_label.setText(str(self._snapshot.get("positions_text", tr("exchange.positions"))))
+                self.pnl_label.setText(str(self._snapshot.get("pnl_text", tr("exchange.pnl"))))
         else:
-            if self.is_new:
+            if self._last_error_message:
+                self._set_status_view(self._last_error_message, "danger", "#ef4444", "#dc2626")
+            elif self.is_new:
                 self.status_widget.setVisible(False)
             else:
                 self._set_status_view(tr("exchange.status.disconnected"), "text_muted", "#ef4444", "#dc2626")
@@ -307,6 +390,12 @@ class ExchangePanel(QFrame):
                 self.cancel_btn.setVisible(False)
                 self.api_group.setVisible(False)
 
+        self.connect_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(True)
+        self.edit_btn.setEnabled(True)
+        self.disconnect_btn.setEnabled(True)
+        self.close_positions_btn.setEnabled(True)
+        self.remove_btn.setEnabled(True)
         self.remove_btn.setVisible(not self.is_new)
 
     @staticmethod
@@ -378,10 +467,47 @@ class ExchangePanel(QFrame):
         self.edit_mode = edit_mode
         self._update_ui_state()
 
+    def set_busy(self, busy: bool) -> None:
+        self._busy = bool(busy)
+        self._busy_mode = "connect" if self._busy else None
+        self._update_ui_state()
+
+    def set_busy_mode(self, mode: str | None) -> None:
+        self._busy = mode is not None
+        self._busy_mode = mode if self._busy else None
+        self._update_ui_state()
+
+    def apply_account_snapshot(self, snapshot: dict) -> None:
+        self._snapshot = dict(snapshot or {})
+        self._last_error_message = None
+        self.balance_label.setText(str(self._snapshot.get("balance_text", tr("exchange.balance"))))
+        self.positions_label.setText(str(self._snapshot.get("positions_text", tr("exchange.positions"))))
+        self.pnl_label.setText(str(self._snapshot.get("pnl_text", tr("exchange.pnl"))))
+        self._update_ui_state()
+
+    def show_connection_error(self, message: str) -> None:
+        self._busy = False
+        self._busy_mode = None
+        self.is_connected = False
+        self._snapshot = None
+        self._last_error_message = str(message or "")
+        self._update_ui_state()
+
+    def show_operation_error(self, message: str) -> None:
+        self._busy = False
+        self._busy_mode = None
+        self._last_error_message = str(message or "")
+        self._update_ui_state()
+
     def mark_connected(self, connected: bool = True, demo: bool = False) -> None:
         del demo
+        self._busy = False
+        self._busy_mode = None
         self.is_connected = connected
         self.testnet = False
+        if not connected:
+            self._snapshot = None
+        self._last_error_message = None
         self._update_ui_state()
 
     def load_saved_data(self, params: dict) -> None:
@@ -408,7 +534,7 @@ class ExchangePanel(QFrame):
                     stop: 1 {panel_bottom}
                 );
                 margin: 0px;
-                padding: 7px;
+                padding: {5 if self.is_new else 7}px;
             }}
             QGroupBox {{
                 border: none;
@@ -423,12 +549,15 @@ class ExchangePanel(QFrame):
                 left: 2px;
                 padding: 0 4px;
             }}
+            QWidget {{
+                background: transparent;
+            }}
             QLineEdit {{
                 background-color: {theme_color('surface')};
                 color: {theme_color('text_primary')};
                 border: 1px solid {soft_field_border};
                 border-radius: 10px;
-                padding: 5px 8px;
+                padding: {4 if self.is_new else 5}px {7 if self.is_new else 8}px;
             }}
             QLineEdit:hover {{
                 border-color: {soft_hover_border};
@@ -441,6 +570,17 @@ class ExchangePanel(QFrame):
             }}
             """
         )
+        if self.is_new:
+            self.form_actions_widget.setStyleSheet(
+                f"""
+                QWidget {{
+                    border-top: 1px solid {self._rgba(theme_color('border'), 0.36)};
+                    padding-top: 2px;
+                }}
+                """
+            )
+        else:
+            self.form_actions_widget.setStyleSheet("")
         self.balance_label.setStyleSheet(self._metric_capsule_style("success", bold=True))
         self.positions_label.setStyleSheet(self._metric_capsule_style("warning"))
         self.pnl_label.setStyleSheet(self._metric_capsule_style("text_muted", bold=True))
@@ -449,8 +589,10 @@ class ExchangePanel(QFrame):
             color: {theme_color('text_primary')};
             background-color: {self._rgba(theme_color('window_bg'), 0.70)};
             border: 1px solid {self._rgba(theme_color('border'), 0.52)};
-            border-radius: 10px;
-            padding: 3px 9px;
+            border-radius: 8px;
+            padding: 1px 7px;
+            font-size: 12px;
+            font-weight: 700;
             """
         )
         self.connect_btn.setStyleSheet(self._soft_button_style("primary"))

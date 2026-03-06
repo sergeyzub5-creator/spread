@@ -38,7 +38,7 @@ class AppWindow(QMainWindow):
         self._create_top_controls(layout)
 
         self.tabs = QTabWidget()
-        self.exchanges_tab = ExchangesMockTab()
+        self.exchanges_tab = ExchangesMockTab(coordinator=self.coordinator)
         self.spread_tab = SpreadMockTab(coordinator=self.coordinator)
         self.test_tab = PlaceholderTab(
             "placeholder.test_title",
