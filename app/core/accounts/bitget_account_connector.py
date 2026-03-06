@@ -217,7 +217,11 @@ class BitgetAccountConnector:
             switch_status_payload = client.get(self.SWITCH_STATUS_PATH)
         except Exception as exc:
             switch_status_error = exc
-            self._logger.warning("bitget switch-status detection failed: %s", exc)
+            error_text = str(exc).strip().lower()
+            if "classic account mode" in error_text:
+                self._logger.info("bitget switch-status indicates classic account mode")
+            else:
+                self._logger.warning("bitget switch-status detection failed: %s", exc)
 
         switch_data = switch_status_payload.get("data") if isinstance(switch_status_payload, dict) else None
         flattened = self._flatten_switch_data(switch_data)

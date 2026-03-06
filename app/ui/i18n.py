@@ -235,6 +235,7 @@ TRANSLATIONS["ru"].update(
         "spread.transport.bitget_ws_unavailable": "WS для Bitget требует аккаунт UTA",
         "spread.transport.bybit_ws_unavailable": "WS для Bybit пока не подключен",
         "spread.transport.bybit_rest_unavailable": "REST для Bybit пока не подключен",
+        "spread.strategy_params": "Параметры стратегии",
     }
 )
 
@@ -245,6 +246,7 @@ TRANSLATIONS["en"].update(
         "spread.transport.bitget_ws_unavailable": "WS for Bitget requires a UTA account",
         "spread.transport.bybit_ws_unavailable": "WS for Bybit is not connected yet",
         "spread.transport.bybit_rest_unavailable": "REST for Bybit is not connected yet",
+        "spread.strategy_params": "Strategy parameters",
     }
 )
 

@@ -402,15 +402,15 @@ class SpreadMockTab(QWidget):
         pair_row.setContentsMargins(0, 0, 0, 0)
         pair_row.setHorizontalSpacing(8)
         pair_row.setVerticalSpacing(0)
-        pair_row.setColumnMinimumWidth(0, 62)
-        pair_row.setColumnMinimumWidth(2, 62)
+        pair_row.setColumnMinimumWidth(0, 68)
+        pair_row.setColumnMinimumWidth(2, 68)
 
         ws_widget = self._build_transport_widget(slot_name, "ws")
         rest_widget = self._build_transport_widget(slot_name, "rest")
 
-        pair_row.addWidget(ws_widget, 0, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        pair_row.addWidget(ws_widget, 0, 0, Qt.AlignmentFlag.AlignCenter)
         pair_row.addWidget(pair_input, 0, 1, Qt.AlignmentFlag.AlignCenter)
-        pair_row.addWidget(rest_widget, 0, 2, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        pair_row.addWidget(rest_widget, 0, 2, Qt.AlignmentFlag.AlignCenter)
 
         col.addWidget(exchange_btn, 0, Qt.AlignmentFlag.AlignCenter)
         col.addWidget(market_type_btn, 0, Qt.AlignmentFlag.AlignCenter)
@@ -421,7 +421,7 @@ class SpreadMockTab(QWidget):
         widget = QWidget()
         widget.setObjectName("transportWidget")
         widget.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-        widget.setFixedWidth(62)
+        widget.setFixedWidth(68)
         row = QHBoxLayout(widget)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
@@ -434,7 +434,7 @@ class SpreadMockTab(QWidget):
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         button.setFixedHeight(20)
-        button.setFixedWidth(44)
+        button.setFixedWidth(50)
 
         row.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -941,7 +941,7 @@ class SpreadMockTab(QWidget):
             cell = QFrame()
             cell.setObjectName("strategyFieldCapsule")
             cell_layout = QHBoxLayout(cell)
-            cell_layout.setContentsMargins(8, 3, 8, 3)
+            cell_layout.setContentsMargins(10, 4, 10, 4)
             label = QLabel()
             label.setProperty("i18n_key", label_key)
             label.setObjectName("strategyFieldInlineLabel")
@@ -983,7 +983,7 @@ class SpreadMockTab(QWidget):
         if self._select_button is not None:
             self._select_button.setText(tr("spread.select"))
         if self._strategy_title_label is not None:
-            self._strategy_title_label.setText(tr("spread.strategy"))
+            self._strategy_title_label.setText(tr("spread.strategy_params"))
         for label in self._strategy_field_labels:
             label.setText(tr(str(label.property("i18n_key"))))
 
@@ -1187,16 +1187,18 @@ class SpreadMockTab(QWidget):
                 color: {c_primary};
                 font-size: 11px;
                 font-weight: 700;
+                padding-left: 4px;
             }}
             QFrame#strategyFieldCapsule {{
                 background: qlineargradient(x1: 1, y1: 0, x2: 0, y2: 0, stop: 0 {self._rgba(c_surface, 0.70)}, stop: 1 {self._rgba(c_alt, 0.94)});
-                border: 1px solid {self._rgba(c_border, 0.68)};
+                border: 1px solid {self._rgba(c_border, 0.60)};
                 border-radius: 8px;
             }}
             QLabel#strategyFieldInlineLabel {{
                 color: {c_muted};
                 font-size: 10px;
                 font-weight: 600;
+                padding-left: 4px;
             }}
             QFrame#strategyFieldDivider {{
                 background-color: {self._rgba(c_border, 0.62)};
@@ -1207,18 +1209,21 @@ class SpreadMockTab(QWidget):
             QPushButton#strategyFieldInputButton {{
                 background-color: transparent;
                 color: {c_primary};
-                border: none;
-                min-height: 22px;
-                padding: 0 2px;
-                font-size: 13px;
+                border: 1px solid {self._rgba(c_border, 0.68)};
+                border-radius: 9px;
+                min-height: 20px;
+                padding: 0 10px;
+                font-size: 12px;
                 font-weight: 700;
                 text-align: right;
             }}
             QPushButton#strategyFieldInputButton:hover {{
-                color: {c_accent};
+                background-color: {self._rgba(c_alt, 0.88)};
+                border: 1px solid {self._rgba(c_accent, 0.78)};
             }}
             QPushButton#strategyFieldInputButton:pressed {{
-                color: {self._rgba(c_accent, 0.82)};
+                background-color: {self._rgba(c_alt, 0.94)};
+                border: 1px solid {self._rgba(c_accent, 0.88)};
             }}
             """
         )
