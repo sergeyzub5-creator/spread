@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QFrame, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from ui.exchange_catalog import get_exchange_meta, normalize_exchange_code, requires_passphrase
@@ -62,8 +62,8 @@ class ExchangePanel(QFrame):
                 r = int(color[1:3], 16)
                 g = int(color[3:5], 16)
                 b = int(color[5:7], 16)
-                a = max(0.0, min(1.0, float(alpha)))
-                return f"rgba({r}, {g}, {b}, {a:.3f})"
+                a = max(0, min(255, int(round(max(0.0, min(1.0, float(alpha))) * 255))))
+                return f"rgba({r}, {g}, {b}, {a})"
             except ValueError:
                 return color
         return color
@@ -150,10 +150,6 @@ class ExchangePanel(QFrame):
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.name_label = QLabel(self.exchange_name)
-        font = QFont()
-        font.setPointSize(10)
-        font.setBold(True)
-        self.name_label.setFont(font)
         self.name_label.setMinimumWidth(84)
 
         self.status_label = QLabel()

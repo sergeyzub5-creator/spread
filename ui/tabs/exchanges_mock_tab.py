@@ -28,7 +28,8 @@ class ExchangesMockTab(QWidget):
             r = int(color[1:3], 16)
             g = int(color[3:5], 16)
             b = int(color[5:7], 16)
-            return f"rgba({r}, {g}, {b}, {max(0.0, min(1.0, alpha)):.3f})"
+            a = max(0, min(255, int(round(max(0.0, min(1.0, alpha)) * 255))))
+            return f"rgba({r}, {g}, {b}, {a})"
         return color
 
     def _soft_button_style(self, role: str, bold: bool = False) -> str:

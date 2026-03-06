@@ -131,7 +131,6 @@ def build_app_stylesheet() -> str:
         QWidget {{
             background-color: {c['window_bg']};
             color: {c['text_primary']};
-            font-family: 'Segoe UI', sans-serif;
         }}
         QTabWidget::pane {{
             background: qlineargradient(
@@ -190,13 +189,26 @@ def button_style(kind: str = "primary") -> str:
     c = get_theme_manager().colors()
     palette = {
         "primary": (c["accent_bg"], c["accent"], c["text_primary"], c["accent_bg_hover"]),
-        "success": ("rgba(40, 90, 58, 0.80)", c["success"], c["text_primary"], "rgba(52, 112, 72, 0.90)"),
-        "warning": ("rgba(90, 74, 38, 0.80)", c["warning"], c["text_primary"], "rgba(112, 90, 48, 0.90)"),
+        "success": ("rgba(40, 90, 58, 204)", c["success"], c["text_primary"], "rgba(52, 112, 72, 230)"),
+        "warning": ("rgba(90, 74, 38, 204)", c["warning"], c["text_primary"], "rgba(112, 90, 48, 230)"),
         "secondary": (c["surface_alt"], c["border"], c["text_muted"], c["surface"]),
     }
     bg, border, text, hover = palette.get(kind, palette["primary"])
-    return (
-        f"QPushButton {{ background-color: {bg}; color: {text}; border: 1px solid {border}; "
-        "border-radius: 10px; padding: 8px 14px; font-weight: 700; }}"
-        f" QPushButton:hover {{ background-color: {hover}; }}"
-    )
+    return f"""
+        QPushButton {{
+            background-color: {bg};
+            color: {text};
+            border: 1px solid {border};
+            border-radius: 10px;
+            padding: 8px 14px;
+            font-weight: 700;
+        }}
+        QPushButton:hover {{
+            background-color: {hover};
+            border: 1px solid {border};
+        }}
+        QPushButton:pressed {{
+            background-color: {hover};
+            border: 1px solid {border};
+        }}
+    """

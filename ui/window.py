@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMainWindow, QMenu, QSizePolicy, QTabWidget, QToolButton, QVBoxLayout, QWidget
 
 from ui.i18n import get_language_manager, tr
@@ -121,6 +121,7 @@ class AppWindow(QMainWindow):
 
     def _build_language_menu(self) -> None:
         self.language_menu.clear()
+        self.language_menu.setFont(self._build_menu_font())
         current_language = self.language_manager.language()
         for code in self.language_manager.available_languages():
             action = self.language_menu.addAction(tr(f"language.{code}"))
@@ -128,9 +129,18 @@ class AppWindow(QMainWindow):
             action.setChecked(code == current_language)
             action.triggered.connect(lambda _checked=False, selected=code: self.language_manager.set_language(selected))
 
+    @staticmethod
+    def _build_menu_font() -> QFont:
+        font = QFont("Segoe UI")
+        font.setPointSize(9)
+        font.setWeight(QFont.Weight.DemiBold)
+        return font
+
     def _build_settings_menu(self) -> None:
         self.settings_menu.clear()
         themes_submenu = self.settings_menu.addMenu(tr("top.themes"))
+        self.settings_menu.setFont(self._build_menu_font())
+        themes_submenu.setFont(self._build_menu_font())
         current_theme = self.theme_manager.theme_name
         for code, label_key in (("dark", "theme.dark"), ("steel", "theme.steel"), ("graphite_pro", "theme.graphite_pro")):
             action = themes_submenu.addAction(tr(label_key))
@@ -145,8 +155,6 @@ class AppWindow(QMainWindow):
                 border: 1px solid {theme_color('border')};
                 border-radius: 8px;
                 padding: 3px;
-                font-size: 11px;
-                font-weight: 600;
             }}
             QMenu::item {{
                 padding: 3px 8px;
@@ -155,6 +163,11 @@ class AppWindow(QMainWindow):
             QMenu::item:selected {{
                 background-color: {theme_color('selection_bg_soft')};
                 color: {theme_color('accent')};
+            }}
+            QMenu::right-arrow {{
+                image: none;
+                width: 0px;
+                height: 0px;
             }}
         """
         self.settings_menu.setStyleSheet(compact_menu_qss)
@@ -173,8 +186,6 @@ class AppWindow(QMainWindow):
                 color: {theme_color('text_primary')};
                 border: 1px solid {theme_color('border')};
                 border-radius: 8px;
-                font-size: 12px;
-                font-weight: 600;
                 padding: 0;
                 margin: 0;
             }}
@@ -192,8 +203,6 @@ class AppWindow(QMainWindow):
             f"""
             QLabel {{
                 color: {theme_color('text_primary')};
-                font-size: 12px;
-                font-weight: 700;
                 padding: 0;
                 margin: 0;
             }}
@@ -207,8 +216,6 @@ class AppWindow(QMainWindow):
                 color: {theme_color('text_primary')};
                 border: 1px solid {theme_color('border')};
                 border-radius: 8px;
-                font-size: 12px;
-                font-weight: 600;
                 padding: 1px 12px;
             }}
             QToolButton::menu-indicator {{
@@ -220,6 +227,9 @@ class AppWindow(QMainWindow):
             }}
             """
         )
+        self.language_btn.setFont(self._build_top_font(weight=QFont.Weight.DemiBold))
+        self.language_code_label.setFont(self._build_top_font(weight=QFont.Weight.Bold))
+        self.settings_btn.setFont(self._build_top_font(weight=QFont.Weight.DemiBold))
 
         self._retranslate_ui()
         self._sync_header_side_widths()
@@ -227,6 +237,13 @@ class AppWindow(QMainWindow):
         self.spread_tab.apply_theme()
         self.test_tab.apply_theme()
         self.status_bar.apply_theme()
+
+    @staticmethod
+    def _build_top_font(weight: QFont.Weight) -> QFont:
+        font = QFont("Segoe UI")
+        font.setPointSize(10)
+        font.setWeight(weight)
+        return font
 
     def _retranslate_ui(self, _language: str | None = None) -> None:
         self.setWindowTitle(tr("app.window_title"))
@@ -242,12 +259,9 @@ class AppWindow(QMainWindow):
         self.spread_tab.retranslate_ui()
         self.test_tab.retranslate_ui()
         self.status_bar.retranslate_ui()
-        current_index = self.tabs.currentIndex()
-        if current_index >= 0:
-            self.status_bar.show_message(tr("status.active_tab", name=self.tabs.tabText(current_index)), timeout_ms=1800)
 
     def _on_tab_changed(self, index: int) -> None:
-        self.status_bar.show_message(tr("status.active_tab", name=self.tabs.tabText(index)), timeout_ms=1800)
+        del index
 
     def _on_tab_action(self, action_name: str) -> None:
         self.status_bar.show_message(action_name, timeout_ms=1800)

@@ -111,7 +111,6 @@ class NetworkStatusBar(QFrame):
 
         self.error_label = QLabel()
         self.error_label.hide()
-        layout.addWidget(self.error_label)
 
     def stop_background_tasks(self) -> None:
         self.clock_timer.stop()
@@ -182,7 +181,7 @@ class NetworkStatusBar(QFrame):
                 border-radius: 10px;
                 font-size: 20px;
                 font-weight: 800;
-                font-family: "Segoe UI", "Consolas", monospace;
+                font-family: "Segoe UI";
                 letter-spacing: 1px;
                 padding: 1px 12px;
             }}
@@ -210,10 +209,9 @@ class NetworkStatusBar(QFrame):
         self.set_recording_state(self._recording_active)
 
     def _show_notice(self, message: str, color: str, timeout_ms: int) -> None:
-        self.error_label.setStyleSheet(f"color: {color};")
-        self.error_label.setText(message)
-        self.error_label.show()
-        self._error_hide_timer.start(max(0, int(timeout_ms)))
+        del message
+        del color
+        del timeout_ms
 
     def show_message(self, message: str, timeout_ms: int = 2400) -> None:
         self._show_notice(str(message or ""), theme_color("text_muted"), timeout_ms)

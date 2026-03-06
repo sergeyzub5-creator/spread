@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPixmap
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 
 from ui.exchange_catalog import get_exchange_meta, normalize_exchange_code
 
@@ -71,7 +71,6 @@ def _create_badge_pixmap(exchange_code: str, size: int = 18) -> QPixmap:
     if logo_pixmap is not None:
         return logo_pixmap
     meta = get_exchange_meta(exchange_code)
-    short = meta["short"]
     bg = QColor(meta["color"])
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
@@ -80,12 +79,6 @@ def _create_badge_pixmap(exchange_code: str, size: int = 18) -> QPixmap:
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(bg)
     painter.drawRoundedRect(0, 0, size, size, 4, 4)
-    font = QFont("Segoe UI", max(7, size // 3))
-    font.setBold(True)
-    painter.setFont(font)
-    text_color = QColor("#FFFFFF") if bg.lightness() <= 160 else QColor("#111111")
-    painter.setPen(text_color)
-    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, short)
     painter.end()
     return pixmap
 

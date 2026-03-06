@@ -23,6 +23,8 @@ class UiCoordinator(QObject):
 
     public_quote_received = Signal(str, object)
     public_quote_error = Signal(str)
+    instruments_loaded = Signal(str, str)
+    instruments_load_failed = Signal(str, str, str)
 
     def __init__(
         self,
@@ -68,19 +70,16 @@ class UiCoordinator(QObject):
         return []
 
     def list_instruments(self, exchange: str, market_type: str) -> list[str]:
-        try:
-            self._ensure_market_type_loaded(exchange, market_type)
-        except Exception as exc:
-            self.public_quote_error.emit(f"{exchange} instruments load failed: {exc}")
+        if not self._is_market_type_loaded(str(exchange or "").strip().lower(), str(market_type or "").strip().lower()):
+            self._prefetch_market_type(exchange, market_type)
             return []
         instruments = self.instrument_registry.list_by_ui_market_type(exchange, market_type)
         return [instrument.symbol for instrument in instruments]
 
     def subscribe_public_quote(self, slot_name: str, exchange: str, market_type: str, symbol: str) -> None:
-        try:
-            self._ensure_market_type_loaded(exchange, market_type)
-        except Exception as exc:
-            self.public_quote_error.emit(f"{exchange} instruments load failed: {exc}")
+        if not self._is_market_type_loaded(str(exchange or "").strip().lower(), str(market_type or "").strip().lower()):
+            self._prefetch_market_type(exchange, market_type)
+            self.public_quote_error.emit(f"{exchange} instruments are still loading")
             return
 
         instrument = self.instrument_registry.find_by_ui_symbol(exchange, symbol=symbol, ui_market_type=market_type)
@@ -99,9 +98,19 @@ class UiCoordinator(QObject):
         self._subscriptions[slot_name] = (instrument, _handle_quote)
         self.market_data_service.subscribe_l1(instrument, _handle_quote)
 
+    def unsubscribe_public_quote(self, slot_name: str) -> None:
+        previous = self._subscriptions.pop(slot_name, None)
+        if previous is None:
+            return
+        instrument, callback = previous
+        self.market_data_service.unsubscribe_l1(instrument, callback)
+
     def prefetch_exchange_instruments(self, exchange: str) -> None:
         for market_type, _title in self.list_market_types(exchange):
             self._prefetch_market_type(exchange, market_type)
+
+    def prefetch_market_type(self, exchange: str, market_type: str) -> None:
+        self._prefetch_market_type(exchange, market_type)
 
     def _ensure_exchange_loaded(self, exchange: str) -> None:
         if exchange == "binance":
@@ -120,7 +129,9 @@ class UiCoordinator(QObject):
         def _run_prefetch() -> None:
             try:
                 self._ensure_market_type_loaded(exchange, market_type)
+                self.instruments_loaded.emit(normalized_key[0], normalized_key[1])
             except Exception as exc:
+                self.instruments_load_failed.emit(normalized_key[0], normalized_key[1], str(exc))
                 self.public_quote_error.emit(f"{exchange} instruments preload failed: {exc}")
             finally:
                 with self._load_lock:

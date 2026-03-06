@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from PySide6.QtCore import QPoint, QSize, QStringListModel, Qt, Signal
-from PySide6.QtGui import QFocusEvent, QIcon, QMouseEvent
-from PySide6.QtWidgets import QCompleter, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtGui import QAction, QColor, QFocusEvent, QIcon, QMouseEvent, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QApplication, QCompleter, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton, QSizePolicy, QStyle, QVBoxLayout, QWidget
 
 from ui.i18n import tr
 from ui.theme import theme_color
@@ -10,32 +13,47 @@ from ui.widgets.exchange_badge import build_exchange_icon
 
 
 class PairLineEdit(QLineEdit):
-    first_edit_started = Signal()
     field_focused = Signal()
     field_clicked = Signal()
+    field_blurred = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._clear_on_next_focus = False
+        self._locked_selection = False
 
     def mark_selected_value(self) -> None:
-        self._clear_on_next_focus = True
+        self._locked_selection = True
+
+    def clear_selected_value_lock(self) -> None:
+        self._locked_selection = False
+
+    def has_locked_selection(self) -> bool:
+        return self._locked_selection
 
     def focusInEvent(self, event: QFocusEvent) -> None:
         super().focusInEvent(event)
         self.field_focused.emit()
-        if self._clear_on_next_focus:
-            self.clear()
-            self._clear_on_next_focus = False
-            self.first_edit_started.emit()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         super().mousePressEvent(event)
         self.field_clicked.emit()
 
+    def focusOutEvent(self, event: QFocusEvent) -> None:
+        super().focusOutEvent(event)
+        self.field_blurred.emit()
+
+    def keyPressEvent(self, event) -> None:
+        if self._locked_selection:
+            key = event.key()
+            if event.text() or key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+                self.clear()
+                self._locked_selection = False
+        super().keyPressEvent(event)
+
 
 class SpreadMockTab(QWidget):
     action_triggered = Signal(str)
+    _STATE_PATH = Path(__file__).resolve().parents[2] / "data" / "ui_state.json"
 
     def __init__(self, coordinator=None, parent=None) -> None:
         super().__init__(parent)
@@ -47,6 +65,7 @@ class SpreadMockTab(QWidget):
         self._exchange_buttons: dict[str, QPushButton] = {}
         self._market_type_buttons: dict[str, QPushButton] = {}
         self._pair_inputs: dict[str, PairLineEdit] = {}
+        self._pair_clear_actions: dict[str, QAction] = {}
         self._pair_models: dict[str, QStringListModel] = {}
         self._pair_completers: dict[str, QCompleter] = {}
         self._quote_labels: dict[str, dict[str, QLabel]] = {}
@@ -55,11 +74,16 @@ class SpreadMockTab(QWidget):
         self._select_button: QPushButton | None = None
         self._strategy_title_label: QLabel | None = None
         self._build_ui()
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
         self.apply_theme()
         self.retranslate_ui()
         if self.coordinator is not None:
             self.coordinator.public_quote_received.connect(self._on_public_quote_received)
             self.coordinator.public_quote_error.connect(lambda message: self._emit(f"spread:error:{message}"))
+            self.coordinator.instruments_loaded.connect(self._on_instruments_loaded)
+        self._restore_saved_state()
 
     @staticmethod
     def _rgba(hex_color: str, alpha: float) -> str:
@@ -68,11 +92,97 @@ class SpreadMockTab(QWidget):
             r = int(color[1:3], 16)
             g = int(color[3:5], 16)
             b = int(color[5:7], 16)
-            return f"rgba({r}, {g}, {b}, {max(0.0, min(1.0, alpha)):.3f})"
+            a = max(0, min(255, int(round(max(0.0, min(1.0, alpha)) * 255))))
+            return f"rgba({r}, {g}, {b}, {a})"
         return color
 
     def _emit(self, name: str) -> None:
         self.action_triggered.emit(name)
+
+    def eventFilter(self, watched, event):
+        if event.type() == event.Type.MouseButtonPress:
+            for slot_name, pair_input in self._pair_inputs.items():
+                popup = self._pair_completers[slot_name].popup()
+                if not pair_input.hasFocus() and not popup.isVisible():
+                    continue
+                try:
+                    global_pos = event.globalPosition().toPoint()
+                except AttributeError:
+                    global_pos = event.globalPos()
+                pair_local = pair_input.mapFromGlobal(global_pos)
+                popup_local = popup.mapFromGlobal(global_pos)
+                if pair_input.rect().contains(pair_local) or popup.rect().contains(popup_local):
+                    break
+                pair_input.clearFocus()
+                popup.hide()
+                break
+        return super().eventFilter(watched, event)
+
+    def _save_state(self) -> None:
+        payload = {
+            "spread_slots": {
+                slot_name: {
+                    "exchange": state["exchange"],
+                    "market_type": state["market_type"],
+                    "symbol": state["symbol"],
+                }
+                for slot_name, state in self._slot_state.items()
+            }
+        }
+        self._STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self._STATE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _load_saved_state(self) -> dict[str, dict[str, str | None]]:
+        if not self._STATE_PATH.exists():
+            return {}
+        try:
+            payload = json.loads(self._STATE_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return {}
+        slots = payload.get("spread_slots")
+        if not isinstance(slots, dict):
+            return {}
+        result: dict[str, dict[str, str | None]] = {}
+        for slot_name in ("left", "right"):
+            raw_state = slots.get(slot_name)
+            if not isinstance(raw_state, dict):
+                continue
+            result[slot_name] = {
+                "exchange": raw_state.get("exchange"),
+                "market_type": raw_state.get("market_type"),
+                "symbol": raw_state.get("symbol"),
+            }
+        return result
+
+    def _restore_saved_state(self) -> None:
+        if self.coordinator is None:
+            return
+        saved = self._load_saved_state()
+        if not saved:
+            return
+        exchanges = dict(self.coordinator.available_exchanges())
+        for slot_name in ("left", "right"):
+            state = saved.get(slot_name) or {}
+            exchange = state.get("exchange")
+            market_type = state.get("market_type")
+            symbol = state.get("symbol")
+            if exchange and exchange in exchanges:
+                self._slot_state[slot_name]["exchange"] = exchange
+                self._apply_exchange_button_state(slot_name, exchange, exchanges[exchange])
+            if exchange and market_type:
+                market_types = dict(self.coordinator.list_market_types(exchange))
+                market_title = market_types.get(market_type)
+                if market_title:
+                    self._slot_state[slot_name]["market_type"] = market_type
+                    self._market_type_buttons[slot_name].setText(market_title)
+                    self._pair_inputs[slot_name].setPlaceholderText(tr("spread.enter_symbol"))
+            if exchange and market_type and symbol:
+                self._slot_state[slot_name]["symbol"] = symbol
+                pair_input = self._pair_inputs[slot_name]
+                pair_input.setText(symbol)
+                pair_input.mark_selected_value()
+                self._update_pair_clear_action(slot_name)
+            self._clear_quotes(slot_name)
 
     @staticmethod
     def _format_ui_qty(value: object) -> str:
@@ -130,6 +240,19 @@ class SpreadMockTab(QWidget):
         )
         return menu
 
+    @staticmethod
+    def _build_clear_icon() -> QIcon:
+        pixmap = QPixmap(12, 12)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(QColor("#d8e1ea"), 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawLine(3, 3, 9, 9)
+        painter.drawLine(9, 3, 3, 9)
+        painter.end()
+        return QIcon(pixmap)
+
     def _show_menu(self, anchor: QWidget, items: list[tuple], callback) -> None:
         if not items:
             return
@@ -178,8 +301,16 @@ class SpreadMockTab(QWidget):
         pair_input.setPlaceholderText(tr("spread.choose_instrument"))
         pair_input.textEdited.connect(lambda text, slot=slot_name: self._on_pair_text_edited(slot, text))
         pair_input.returnPressed.connect(lambda slot=slot_name: self._accept_pair_text(slot))
-        pair_input.field_focused.connect(lambda slot=slot_name: self._show_top_instruments(slot))
-        pair_input.field_clicked.connect(lambda slot=slot_name: self._show_top_instruments(slot))
+        pair_input.field_focused.connect(lambda slot=slot_name: self._on_pair_field_focused(slot))
+        pair_input.field_clicked.connect(lambda slot=slot_name: self._on_pair_field_clicked(slot))
+        pair_input.field_blurred.connect(lambda slot=slot_name: self._on_pair_field_blurred(slot))
+
+        clear_icon = self._build_clear_icon()
+        clear_action = QAction(clear_icon, "", pair_input)
+        clear_action.setToolTip(tr("common.cancel"))
+        pair_input.addAction(clear_action, QLineEdit.ActionPosition.TrailingPosition)
+        clear_action.setVisible(False)
+        clear_action.triggered.connect(lambda _checked=False, slot=slot_name: self._clear_symbol(slot))
 
         pair_model = QStringListModel(self)
         pair_completer = QCompleter(pair_model, self)
@@ -247,6 +378,7 @@ class SpreadMockTab(QWidget):
         self._exchange_buttons[slot_name] = exchange_btn
         self._market_type_buttons[slot_name] = market_type_btn
         self._pair_inputs[slot_name] = pair_input
+        self._pair_clear_actions[slot_name] = clear_action
         self._pair_models[slot_name] = pair_model
         self._pair_completers[slot_name] = pair_completer
 
@@ -305,7 +437,40 @@ class SpreadMockTab(QWidget):
 
     def _on_pair_text_edited(self, slot_name: str, text: str) -> None:
         self._slot_state[slot_name]["symbol"] = None
+        self._pair_inputs[slot_name].clear_selected_value_lock()
+        if self.coordinator is not None:
+            self.coordinator.unsubscribe_public_quote(slot_name)
+        self._update_pair_clear_action(slot_name)
         self._update_pair_suggestions(slot_name, text, force_popup=True)
+
+    def _on_pair_field_focused(self, slot_name: str) -> None:
+        self._update_pair_clear_action(slot_name)
+        if self._pair_inputs[slot_name].has_locked_selection():
+            self._pair_completers[slot_name].popup().hide()
+            return
+        self._show_top_instruments(slot_name)
+
+    def _on_pair_field_clicked(self, slot_name: str) -> None:
+        self._update_pair_clear_action(slot_name)
+        if self._pair_inputs[slot_name].has_locked_selection():
+            self._pair_completers[slot_name].popup().hide()
+            return
+        self._show_top_instruments(slot_name)
+
+    def _on_pair_field_blurred(self, slot_name: str) -> None:
+        symbol = self._slot_state[slot_name]["symbol"]
+        pair_input = self._pair_inputs[slot_name]
+        if symbol and pair_input.text().strip().upper() != str(symbol).upper():
+            pair_input.setText(str(symbol))
+            pair_input.mark_selected_value()
+        self._update_pair_clear_action(slot_name)
+
+    def _update_pair_clear_action(self, slot_name: str) -> None:
+        action = self._pair_clear_actions.get(slot_name)
+        if action is None:
+            return
+        pair_input = self._pair_inputs[slot_name]
+        action.setVisible(pair_input.has_locked_selection() and pair_input.hasFocus())
 
     def _update_pair_suggestions(self, slot_name: str, text: str, force_popup: bool = False) -> None:
         state = self._slot_state[slot_name]
@@ -347,25 +512,38 @@ class SpreadMockTab(QWidget):
             self._set_symbol(slot_name, symbol, symbol)
 
     def _set_exchange(self, slot_name: str, exchange: str, title: str) -> None:
+        if self.coordinator is not None:
+            self.coordinator.unsubscribe_public_quote(slot_name)
         self._slot_state[slot_name]["exchange"] = exchange
         self._slot_state[slot_name]["market_type"] = None
         self._slot_state[slot_name]["symbol"] = None
         self._apply_exchange_button_state(slot_name, exchange, title)
         self._market_type_buttons[slot_name].setText(tr("spread.choose_type"))
         self._pair_inputs[slot_name].clear()
+        self._pair_inputs[slot_name].clear_selected_value_lock()
         self._pair_inputs[slot_name].setPlaceholderText(tr("spread.choose_instrument"))
+        self._update_pair_clear_action(slot_name)
         self._clear_quotes(slot_name)
         if self.coordinator is not None:
             self.coordinator.prefetch_exchange_instruments(exchange)
+        self._save_state()
         self._emit(f"spread:exchange:{slot_name}:{exchange}")
 
     def _set_market_type(self, slot_name: str, market_type: str, title: str) -> None:
+        if self.coordinator is not None:
+            self.coordinator.unsubscribe_public_quote(slot_name)
         self._slot_state[slot_name]["market_type"] = market_type
         self._slot_state[slot_name]["symbol"] = None
         self._market_type_buttons[slot_name].setText(title)
         self._pair_inputs[slot_name].clear()
+        self._pair_inputs[slot_name].clear_selected_value_lock()
         self._pair_inputs[slot_name].setPlaceholderText(tr("spread.enter_symbol"))
+        self._update_pair_clear_action(slot_name)
         self._clear_quotes(slot_name)
+        exchange = self._slot_state[slot_name]["exchange"]
+        if self.coordinator is not None and exchange:
+            self.coordinator.prefetch_market_type(exchange, market_type)
+        self._save_state()
         self._emit(f"spread:market_type:{slot_name}:{market_type}")
 
     def _set_symbol(self, slot_name: str, symbol: str, title: str) -> None:
@@ -373,9 +551,37 @@ class SpreadMockTab(QWidget):
         pair_input = self._pair_inputs[slot_name]
         pair_input.setText(title)
         pair_input.mark_selected_value()
+        self._pair_completers[slot_name].popup().hide()
+        pair_input.clearFocus()
+        self._update_pair_clear_action(slot_name)
         self._clear_quotes(slot_name)
+        self._save_state()
         self._emit(f"spread:instrument:{slot_name}:{symbol}")
-        self._subscribe_slot(slot_name)
+
+    def _clear_symbol(self, slot_name: str) -> None:
+        if self.coordinator is not None:
+            self.coordinator.unsubscribe_public_quote(slot_name)
+        self._slot_state[slot_name]["symbol"] = None
+        pair_input = self._pair_inputs[slot_name]
+        pair_input.clear()
+        pair_input.clear_selected_value_lock()
+        pair_input.setPlaceholderText(
+            tr("spread.enter_symbol") if self._slot_state[slot_name]["market_type"] else tr("spread.choose_instrument")
+        )
+        self._pair_completers[slot_name].popup().hide()
+        self._update_pair_clear_action(slot_name)
+        self._clear_quotes(slot_name)
+        self._save_state()
+        self._emit(f"spread:instrument_cleared:{slot_name}")
+        self._update_pair_suggestions(slot_name, "", force_popup=True)
+
+    def _on_instruments_loaded(self, exchange: str, market_type: str) -> None:
+        for slot_name, state in self._slot_state.items():
+            if state["exchange"] != exchange or state["market_type"] != market_type:
+                continue
+            pair_input = self._pair_inputs[slot_name]
+            if pair_input.hasFocus() and not pair_input.text().strip():
+                self._update_pair_suggestions(slot_name, "", force_popup=True)
 
     def _subscribe_slot(self, slot_name: str) -> None:
         if self.coordinator is None:
@@ -659,20 +865,20 @@ class SpreadMockTab(QWidget):
                 color: {theme_color('success')};
                 font-size: 11px;
                 font-weight: 700;
-                font-family: Consolas, "Courier New", monospace;
+                font-family: "Consolas";
             }}
             QLabel#askPriceText {{
                 color: {theme_color('danger')};
                 font-size: 11px;
                 font-weight: 700;
-                font-family: Consolas, "Courier New", monospace;
+                font-family: "Consolas";
             }}
             QLabel#quoteQtyText {{
                 color: {c_primary};
                 font-size: 11px;
                 font-weight: 700;
                 padding-right: 1px;
-                font-family: Consolas, "Courier New", monospace;
+                font-family: "Consolas";
             }}
             QFrame#strategyPanel {{
                 background-color: {self._rgba(c_surface, 0.72)};
