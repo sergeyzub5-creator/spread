@@ -10,6 +10,7 @@ from app.ui.exchange_store import load_exchange_cards, save_exchange_cards
 from app.ui.i18n import tr
 from app.ui.theme import theme_color
 from app.ui.widgets.add_exchange_dialog import AddExchangeDialog
+from app.ui.widgets.confirm_dialog import ConfirmDialog
 from app.ui.widgets.exchange_card_mock import ExchangeCardMock
 from app.ui.widgets.exchange_picker_dialog import ExchangePickerDialog
 
@@ -212,6 +213,13 @@ class ExchangesMockTab(QWidget):
         self.action_triggered.emit(f"{exchange_name}:disconnect")
 
     def _handle_remove(self, exchange_name: str) -> None:
+        if not ConfirmDialog.ask(
+            title=tr("exchange.remove_confirm_title"),
+            message=tr("exchange.remove_confirm_message", exchange=exchange_name),
+            confirm_text=tr("exchange.remove"),
+            parent=self,
+        ):
+            return
         for index, card in enumerate(list(self.cards)):
             if card.exchange_name != exchange_name:
                 continue

@@ -190,6 +190,8 @@ class ExchangePanel(QFrame):
             label.setMinimumHeight(28)
             label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             self.stats_layout.addWidget(label)
+        self.positions_label.setTextFormat(Qt.TextFormat.RichText)
+        self.pnl_label.setTextFormat(Qt.TextFormat.RichText)
         self.stats_layout.setStretch(0, 2)
         self.stats_layout.setStretch(1, 2)
         self.stats_layout.setStretch(2, 2)
@@ -582,8 +584,8 @@ class ExchangePanel(QFrame):
         else:
             self.form_actions_widget.setStyleSheet("")
         self.balance_label.setStyleSheet(self._metric_capsule_style("success", bold=True))
-        self.positions_label.setStyleSheet(self._metric_capsule_style("warning"))
-        self.pnl_label.setStyleSheet(self._metric_capsule_style("text_muted", bold=True))
+        self.positions_label.setStyleSheet(self._metric_capsule_style("text_primary"))
+        self.pnl_label.setStyleSheet(self._metric_capsule_style("text_primary", bold=True))
         self.name_label.setStyleSheet(
             f"""
             color: {theme_color('text_primary')};

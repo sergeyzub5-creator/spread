@@ -20,6 +20,9 @@ class WorkerTask:
     execution_mode: str
     run_mode: str
     execution_credentials: ExchangeCredentials | None = None
+    left_execution_credentials: ExchangeCredentials | None = None
+    right_execution_credentials: ExchangeCredentials | None = None
+    runtime_params: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)

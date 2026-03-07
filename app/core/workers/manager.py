@@ -34,12 +34,42 @@ class WorkerManager:
         if runtime is None:
             return
         runtime.stop()
+        self._workers.pop(worker_id, None)
+
+    def shutdown(self) -> None:
+        for worker_id in list(self._workers.keys()):
+            self.stop_worker(worker_id)
 
     def submit_test_order(self, worker_id: str, side: str, submitted_at_ms: int | None = None) -> dict:
         runtime = self._workers.get(worker_id)
         if runtime is None:
             raise KeyError(f"Worker not found: {worker_id}")
         return runtime.submit_test_order(side, submitted_at_ms=submitted_at_ms)
+
+    def submit_dual_test_orders(
+        self,
+        worker_id: str,
+        *,
+        left_side: str,
+        right_side: str,
+        left_qty: str,
+        right_qty: str,
+        left_price_mode: str = "top_of_book",
+        right_price_mode: str = "top_of_book",
+        submitted_at_ms: int | None = None,
+    ) -> dict:
+        runtime = self._workers.get(worker_id)
+        if runtime is None:
+            raise KeyError(f"Worker not found: {worker_id}")
+        return runtime.submit_dual_test_orders(
+            left_side=left_side,
+            right_side=right_side,
+            left_qty=left_qty,
+            right_qty=right_qty,
+            left_price_mode=left_price_mode,
+            right_price_mode=right_price_mode,
+            submitted_at_ms=submitted_at_ms,
+        )
 
     def get_worker(self, worker_id: str) -> WorkerRuntime | None:
         return self._workers.get(worker_id)

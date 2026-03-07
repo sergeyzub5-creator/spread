@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QSize, QStringListModel, Qt, QTimer, Signal
@@ -57,6 +58,7 @@ class PairLineEdit(QLineEdit):
 class SpreadMockTab(QWidget):
     action_triggered = Signal(str)
     _STATE_PATH = Path(__file__).resolve().parents[2] / "data" / "ui_state.json"
+    _SPREAD_WORKER_ID = "spread_live_runtime"
 
     def __init__(self, coordinator=None, parent=None) -> None:
         super().__init__(parent)
@@ -76,13 +78,18 @@ class SpreadMockTab(QWidget):
         self._quote_labels: dict[str, dict[str, QLabel]] = {}
         self._transport_widgets: dict[str, dict[str, object]] = {}
         self._pending_quotes: dict[str, dict] = {}
+        self._pending_spread_state: dict | None = None
         self._strategy_field_labels: list[QLabel] = []
+        self._strategy_inputs: dict[str, QLineEdit] = {}
         self._spread_value_label: QLabel | None = None
         self._select_button: QPushButton | None = None
         self._strategy_title_label: QLabel | None = None
         self._ui_quote_timer = QTimer(self)
         self._ui_quote_timer.setInterval(50)
         self._ui_quote_timer.timeout.connect(self._flush_pending_quotes)
+        self._ui_spread_timer = QTimer(self)
+        self._ui_spread_timer.setInterval(50)
+        self._ui_spread_timer.timeout.connect(self._flush_pending_spread_state)
         self._build_ui()
         app = QApplication.instance()
         if app is not None:
@@ -93,6 +100,7 @@ class SpreadMockTab(QWidget):
             self.coordinator.public_quote_received.connect(self._on_public_quote_received)
             self.coordinator.public_quote_error.connect(lambda message: self._emit(f"spread:error:{message}"))
             self.coordinator.instruments_loaded.connect(self._on_instruments_loaded)
+            self.coordinator.worker_state_updated.connect(self._on_worker_state_updated)
         self._restore_saved_state()
 
     @staticmethod
@@ -141,7 +149,11 @@ class SpreadMockTab(QWidget):
                     "symbol": state["symbol"],
                 }
                 for slot_name, state in self._slot_state.items()
-            }
+            },
+            "spread_strategy": {
+                key: field.text().strip()
+                for key, field in self._strategy_inputs.items()
+            },
         }
         self._STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         self._STATE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -154,8 +166,9 @@ class SpreadMockTab(QWidget):
         except (OSError, ValueError, TypeError):
             return {}
         slots = payload.get("spread_slots")
+        strategy = payload.get("spread_strategy")
         if not isinstance(slots, dict):
-            return {}
+            slots = {}
         result: dict[str, dict[str, str | None]] = {}
         for slot_name in ("left", "right"):
             raw_state = slots.get(slot_name)
@@ -166,6 +179,11 @@ class SpreadMockTab(QWidget):
                 "market_type": raw_state.get("market_type"),
                 "symbol": raw_state.get("symbol"),
             }
+        if isinstance(strategy, dict):
+            result["__strategy__"] = {
+                str(key): str(value)
+                for key, value in strategy.items()
+            }
         return result
 
     def _restore_saved_state(self) -> None:
@@ -174,6 +192,11 @@ class SpreadMockTab(QWidget):
         saved = self._load_saved_state()
         if not saved:
             return
+        strategy_saved = saved.get("__strategy__") or {}
+        if isinstance(strategy_saved, dict):
+            for key, field in self._strategy_inputs.items():
+                if key in strategy_saved:
+                    field.setText(str(strategy_saved[key]))
         exchanges = dict(self.coordinator.available_quote_exchanges())
         for slot_name in ("left", "right"):
             state = saved.get(slot_name) or {}
@@ -288,6 +311,8 @@ class SpreadMockTab(QWidget):
     def _make_selector_button(self, text: str, object_name: str, slot_name: str, handler) -> QPushButton:
         button = QPushButton(text)
         button.setObjectName(object_name)
+        if object_name == "exchangeSelector":
+            button.setProperty("toneRole", "neutral")
         button.setFixedWidth(230)
         button.clicked.connect(lambda _checked=False, slot=slot_name: handler(slot))
         return button
@@ -737,6 +762,7 @@ class SpreadMockTab(QWidget):
             self._set_symbol(slot_name, symbol, self.coordinator.display_symbol(exchange, market_type, symbol))
 
     def _set_exchange(self, slot_name: str, exchange: str, title: str) -> None:
+        self._stop_spread_runtime()
         if self.coordinator is not None:
             self.coordinator.unsubscribe_public_quote(slot_name)
         self._slot_state[slot_name]["exchange"] = exchange
@@ -756,6 +782,7 @@ class SpreadMockTab(QWidget):
         self._emit(f"spread:exchange:{slot_name}:{exchange}")
 
     def _set_market_type(self, slot_name: str, market_type: str, title: str) -> None:
+        self._stop_spread_runtime()
         if self.coordinator is not None:
             self.coordinator.unsubscribe_public_quote(slot_name)
         self._slot_state[slot_name]["market_type"] = market_type
@@ -773,6 +800,7 @@ class SpreadMockTab(QWidget):
         self._emit(f"spread:market_type:{slot_name}:{market_type}")
 
     def _set_symbol(self, slot_name: str, symbol: str, title: str) -> None:
+        self._stop_spread_runtime()
         self._slot_state[slot_name]["symbol"] = symbol
         pair_input = self._pair_inputs[slot_name]
         pair_input.setText(title)
@@ -785,6 +813,7 @@ class SpreadMockTab(QWidget):
         self._emit(f"spread:instrument:{slot_name}:{symbol}")
 
     def _clear_symbol(self, slot_name: str) -> None:
+        self._stop_spread_runtime()
         if self.coordinator is not None:
             self.coordinator.unsubscribe_public_quote(slot_name)
         self._slot_state[slot_name]["symbol"] = None
@@ -866,10 +895,11 @@ class SpreadMockTab(QWidget):
         labels["ask_price"].setText(str(ask_price))
         labels["bid_qty"].setText(f"{self._format_ui_notional_usdt(bid_price, bid_qty)} USDT")
         labels["ask_qty"].setText(f"{self._format_ui_notional_usdt(ask_price, ask_qty)} USDT")
-        if self._spread_value_label is not None:
+        if self._spread_value_label is not None and self._pending_spread_state is None:
             left = self._slot_state["left"]["symbol"]
             right = self._slot_state["right"]["symbol"]
-            self._spread_value_label.setText("LIVE" if left and right else "--")
+            if not left or not right:
+                self._spread_value_label.setText("--")
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -889,6 +919,7 @@ class SpreadMockTab(QWidget):
 
         center = QFrame()
         center.setObjectName("spreadValueFrame")
+        center.setProperty("edgeTone", "neutral")
         center.setMinimumWidth(250)
         center.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         center_outer = QVBoxLayout(center)
@@ -949,11 +980,14 @@ class SpreadMockTab(QWidget):
             divider = QFrame()
             divider.setObjectName("strategyFieldDivider")
             divider.setFixedWidth(1)
-            edit = QPushButton(value)
-            edit.setObjectName("strategyFieldInputButton")
+            edit = QLineEdit(value)
+            edit.setObjectName("strategyFieldInput")
             edit.setMaximumWidth(72)
             edit.setMinimumWidth(56)
             edit.setFixedHeight(24)
+            edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            edit.editingFinished.connect(self._save_state)
+            self._strategy_inputs[label_key] = edit
             cell_layout.addWidget(label, 1)
             cell_layout.addWidget(divider, 0)
             cell_layout.addWidget(edit, 0)
@@ -965,7 +999,134 @@ class SpreadMockTab(QWidget):
     def _subscribe_both(self) -> None:
         self._subscribe_slot("left")
         self._subscribe_slot("right")
+        self._start_spread_runtime()
         self._emit("spread:select")
+
+    def _start_spread_runtime(self) -> None:
+        if self.coordinator is None:
+            return
+        left = self._slot_state["left"]
+        right = self._slot_state["right"]
+        if not all((left["exchange"], left["market_type"], left["symbol"], right["exchange"], right["market_type"], right["symbol"])):
+            self._set_spread_label_idle()
+            return
+        self.coordinator.start_dual_quotes_runtime_async(
+            worker_id=self._SPREAD_WORKER_ID,
+            left_exchange=str(left["exchange"]),
+            left_market_type=str(left["market_type"]),
+            left_symbol=str(left["symbol"]),
+            right_exchange=str(right["exchange"]),
+            right_market_type=str(right["market_type"]),
+            right_symbol=str(right["symbol"]),
+        )
+
+    def _stop_spread_runtime(self) -> None:
+        if self.coordinator is not None:
+            self.coordinator.stop_test_runtime(self._SPREAD_WORKER_ID)
+        self._pending_spread_state = None
+        if self._ui_spread_timer.isActive():
+            self._ui_spread_timer.stop()
+        self._set_spread_label_idle()
+
+    def _on_worker_state_updated(self, worker_id: str, state: object) -> None:
+        if worker_id != self._SPREAD_WORKER_ID or not isinstance(state, dict):
+            return
+        self._pending_spread_state = dict(state)
+        if not self._ui_spread_timer.isActive():
+            self._ui_spread_timer.start()
+
+    def _flush_pending_spread_state(self) -> None:
+        if self._pending_spread_state is None:
+            self._ui_spread_timer.stop()
+            return
+        state = self._pending_spread_state
+        self._pending_spread_state = None
+        self._render_spread_state(state)
+
+    def _render_spread_state(self, state: dict) -> None:
+        metrics = state.get("metrics", {}) if isinstance(state.get("metrics"), dict) else {}
+        if self._spread_value_label is None:
+            return
+        spread_state = str(metrics.get("spread_state") or "WAITING_QUOTES")
+        edge_1 = self._decimal_or_none(metrics.get("edge_1"))
+        edge_2 = self._decimal_or_none(metrics.get("edge_2"))
+        if spread_state == "LIVE":
+            active_edge = max((value for value in (edge_1, edge_2) if value is not None), default=None)
+            if edge_1 is not None and (edge_2 is None or edge_1 >= edge_2):
+                self._set_exchange_tones(right_slot_cheap=True)
+            elif edge_2 is not None:
+                self._set_exchange_tones(right_slot_cheap=False)
+            else:
+                self._set_exchange_tones(None)
+            self._spread_value_label.setText(self._format_spread_percent(active_edge))
+        else:
+            self._set_exchange_tones(None)
+            self._spread_value_label.setText("--")
+
+    def _set_spread_label_idle(self) -> None:
+        self._set_exchange_tones(None)
+        if self._spread_value_label is not None:
+            self._spread_value_label.setText("--")
+
+    def _current_strategy_params(self) -> dict[str, str]:
+        return {
+            key: field.text().strip()
+            for key, field in self._strategy_inputs.items()
+        }
+
+    def _set_exchange_tones(self, right_slot_cheap: bool | None) -> None:
+        left_button = self._exchange_buttons.get("left")
+        right_button = self._exchange_buttons.get("right")
+        if right_slot_cheap is None:
+            self._apply_button_tone(left_button, "neutral")
+            self._apply_button_tone(right_button, "neutral")
+            self._apply_spread_edge_tone("neutral")
+            return
+        if right_slot_cheap:
+            self._apply_button_tone(left_button, "expensive")
+            self._apply_button_tone(right_button, "cheap")
+            self._apply_spread_edge_tone("right_cheap")
+        else:
+            self._apply_button_tone(left_button, "cheap")
+            self._apply_button_tone(right_button, "expensive")
+            self._apply_spread_edge_tone("left_cheap")
+
+    @staticmethod
+    def _apply_button_tone(button: QPushButton | None, tone_role: str) -> None:
+        if button is None:
+            return
+        if str(button.property("toneRole") or "neutral") == tone_role:
+            return
+        button.setProperty("toneRole", tone_role)
+        button.style().unpolish(button)
+        button.style().polish(button)
+        button.update()
+
+    def _apply_spread_edge_tone(self, tone: str) -> None:
+        frame = self.container.findChild(QFrame, "spreadValueFrame")
+        if frame is None:
+            return
+        if str(frame.property("edgeTone") or "neutral") == tone:
+            return
+        frame.setProperty("edgeTone", tone)
+        frame.style().unpolish(frame)
+        frame.style().polish(frame)
+        frame.update()
+
+    @staticmethod
+    def _decimal_or_none(value: object) -> Decimal | None:
+        if value in (None, "", "-"):
+            return None
+        try:
+            return Decimal(str(value).strip())
+        except Exception:
+            return None
+
+    @staticmethod
+    def _format_spread_percent(value: Decimal | None) -> str:
+        if value is None:
+            return "--"
+        return f"{(value * Decimal('100')):.2f}%"
 
     def retranslate_ui(self) -> None:
         for slot_name, button in self._exchange_buttons.items():
@@ -997,6 +1158,12 @@ class SpreadMockTab(QWidget):
         c_accent = theme_color("accent")
         c_success = theme_color("success")
         c_danger = theme_color("danger")
+        c_cheap_border = self._rgba(c_success, 0.76)
+        c_cheap_tone = self._rgba(c_success, 0.20)
+        c_cheap_hover = self._rgba(c_success, 0.30)
+        c_exp_border = self._rgba(c_danger, 0.76)
+        c_exp_tone = self._rgba(c_danger, 0.18)
+        c_exp_hover = self._rgba(c_danger, 0.28)
         self.container.setStyleSheet(
             f"""
             QFrame#spreadContainer {{
@@ -1029,6 +1196,32 @@ class SpreadMockTab(QWidget):
             QPushButton#exchangeSelector:hover, QPushButton#subSelector:hover {{
                 background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 {self._rgba(c_accent, 0.26)}, stop: 0.50 {self._rgba(c_alt, 0.98)}, stop: 1 {self._rgba(c_surface, 0.96)});
                 border: 1px solid {self._rgba(c_accent, 0.70)};
+            }}
+            QPushButton#exchangeSelector[toneRole="cheap"] {{
+                border: 1px solid {c_cheap_border};
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 {c_cheap_tone},
+                    stop: 0.50 {self._rgba(c_alt, 0.95)},
+                    stop: 1 {c_surface}
+                );
+            }}
+            QPushButton#exchangeSelector[toneRole="cheap"]:hover {{
+                border: 1px solid {c_success};
+                background-color: {c_cheap_hover};
+            }}
+            QPushButton#exchangeSelector[toneRole="expensive"] {{
+                border: 1px solid {c_exp_border};
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 {c_exp_tone},
+                    stop: 0.50 {self._rgba(c_alt, 0.95)},
+                    stop: 1 {c_surface}
+                );
+            }}
+            QPushButton#exchangeSelector[toneRole="expensive"]:hover {{
+                border: 1px solid {c_danger};
+                background-color: {c_exp_hover};
             }}
             QPushButton#exchangeSelector:pressed, QPushButton#subSelector:pressed {{
                 background-color: {self._rgba(c_surface, 0.92)};
@@ -1126,6 +1319,18 @@ class SpreadMockTab(QWidget):
                 border-right: 3px solid {self._rgba(c_danger, 0.92)};
                 border-radius: 14px;
             }}
+            QFrame#spreadValueFrame[edgeTone="neutral"] {{
+                border-left: 3px solid {self._rgba(c_border, 0.76)};
+                border-right: 3px solid {self._rgba(c_border, 0.76)};
+            }}
+            QFrame#spreadValueFrame[edgeTone="left_cheap"] {{
+                border-left: 3px solid {self._rgba(c_success, 0.92)};
+                border-right: 3px solid {self._rgba(c_danger, 0.92)};
+            }}
+            QFrame#spreadValueFrame[edgeTone="right_cheap"] {{
+                border-left: 3px solid {self._rgba(c_danger, 0.92)};
+                border-right: 3px solid {self._rgba(c_success, 0.92)};
+            }}
             QFrame#spreadValueInner {{
                 background-color: {self._rgba(c_alt, 0.95)};
                 border: none;
@@ -1206,7 +1411,7 @@ class SpreadMockTab(QWidget):
                 min-height: 14px;
                 max-height: 14px;
             }}
-            QPushButton#strategyFieldInputButton {{
+            QLineEdit#strategyFieldInput {{
                 background-color: transparent;
                 color: {c_primary};
                 border: 1px solid {self._rgba(c_border, 0.68)};
@@ -1215,13 +1420,12 @@ class SpreadMockTab(QWidget):
                 padding: 0 10px;
                 font-size: 12px;
                 font-weight: 700;
-                text-align: right;
             }}
-            QPushButton#strategyFieldInputButton:hover {{
+            QLineEdit#strategyFieldInput:hover {{
                 background-color: {self._rgba(c_alt, 0.88)};
                 border: 1px solid {self._rgba(c_accent, 0.78)};
             }}
-            QPushButton#strategyFieldInputButton:pressed {{
+            QLineEdit#strategyFieldInput:focus {{
                 background-color: {self._rgba(c_alt, 0.94)};
                 border: 1px solid {self._rgba(c_accent, 0.88)};
             }}

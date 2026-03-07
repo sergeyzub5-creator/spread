@@ -11,7 +11,7 @@
       "account_snapshot": {
         "exchange": "binance",
         "status_text": "Подключено · Spot + Futures",
-        "balance_text": "Баланс: 8.88 USDT",
+        "balance_text": "Баланс: 8.81 USDT",
         "positions_text": "Позиции: 0",
         "pnl_text": "PnL: 0.00 USDT",
         "spot_enabled": true,
@@ -42,7 +42,7 @@
       "account_snapshot": {
         "exchange": "bitget",
         "status_text": "Подключено · Spot + Futures",
-        "balance_text": "Баланс: 14.54 USDT",
+        "balance_text": "Баланс: 14.41 USDT",
         "positions_text": "Позиции: 0",
         "pnl_text": "PnL: 0.00 USDT",
         "spot_enabled": true,

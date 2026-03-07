@@ -396,7 +396,11 @@ class UiCoordinator(QObject):
 
     def shutdown(self) -> None:
         self._shutdown = True
+        for slot_name in list(self._subscriptions.keys()):
+            self.unsubscribe_public_quote(slot_name)
         self.stop_all_exchange_monitors()
+        self.worker_manager.shutdown()
+        self.market_data_service.shutdown()
 
     def start_test_runtime_async(
         self,
@@ -453,6 +457,200 @@ class UiCoordinator(QObject):
         except Exception as exc:
             self.worker_command_failed.emit(worker_id, str(exc))
 
+    def start_dual_quotes_runtime_async(
+        self,
+        *,
+        worker_id: str,
+        left_exchange: str,
+        left_market_type: str,
+        left_symbol: str,
+        right_exchange: str,
+        right_market_type: str,
+        right_symbol: str,
+    ) -> None:
+        self._logger.info(
+            "ui start dual quotes runtime requested | worker_id=%s | left=%s:%s:%s | right=%s:%s:%s",
+            worker_id,
+            left_exchange,
+            left_market_type,
+            left_symbol,
+            right_exchange,
+            right_market_type,
+            right_symbol,
+        )
+
+        def _run() -> None:
+            try:
+                left_instrument = self._resolve_instrument(left_exchange, left_market_type, left_symbol)
+                right_instrument = self._resolve_instrument(right_exchange, right_market_type, right_symbol)
+                task = WorkerTask(
+                    worker_id=worker_id,
+                    left_instrument=left_instrument,
+                    right_instrument=right_instrument,
+                    entry_threshold=Decimal("0"),
+                    exit_threshold=Decimal("0"),
+                    target_notional=Decimal("0"),
+                    step_notional=Decimal("0"),
+                    execution_mode="quotes_only",
+                    run_mode="dual_exchange_quotes",
+                    execution_credentials=None,
+                )
+                self.worker_manager.start_worker(task)
+            except Exception as exc:
+                self._logger.error("dual quotes worker start failed | worker_id=%s | error=%s", worker_id, exc)
+                self.worker_command_failed.emit(worker_id, str(exc))
+
+        threading.Thread(target=_run, name=f"dual-worker-start-{worker_id}", daemon=True).start()
+
+    def start_dual_execution_runtime_async(
+        self,
+        *,
+        worker_id: str,
+        left_exchange: str,
+        left_market_type: str,
+        left_symbol: str,
+        left_api_key: str,
+        left_api_secret: str,
+        left_api_passphrase: str = "",
+        left_account_profile: dict | None = None,
+        right_exchange: str,
+        right_market_type: str,
+        right_symbol: str,
+        right_api_key: str,
+        right_api_secret: str,
+        right_api_passphrase: str = "",
+        right_account_profile: dict | None = None,
+    ) -> None:
+        self._logger.info(
+            "ui start dual execution runtime requested | worker_id=%s | left=%s:%s:%s | right=%s:%s:%s",
+            worker_id,
+            left_exchange,
+            left_market_type,
+            left_symbol,
+            right_exchange,
+            right_market_type,
+            right_symbol,
+        )
+
+        def _run() -> None:
+            try:
+                left_instrument = self._resolve_instrument(left_exchange, left_market_type, left_symbol)
+                right_instrument = self._resolve_instrument(right_exchange, right_market_type, right_symbol)
+                task = WorkerTask(
+                    worker_id=worker_id,
+                    left_instrument=left_instrument,
+                    right_instrument=right_instrument,
+                    entry_threshold=Decimal("0"),
+                    exit_threshold=Decimal("0"),
+                    target_notional=Decimal("0"),
+                    step_notional=Decimal("0"),
+                    execution_mode="manual_dual_test",
+                    run_mode="dual_exchange_test_execution",
+                    execution_credentials=None,
+                    left_execution_credentials=ExchangeCredentials(
+                        exchange=str(left_exchange or "").strip().lower(),
+                        api_key=str(left_api_key or "").strip(),
+                        api_secret=str(left_api_secret or "").strip(),
+                        api_passphrase=str(left_api_passphrase or "").strip(),
+                        account_profile=dict(left_account_profile or {}),
+                    ),
+                    right_execution_credentials=ExchangeCredentials(
+                        exchange=str(right_exchange or "").strip().lower(),
+                        api_key=str(right_api_key or "").strip(),
+                        api_secret=str(right_api_secret or "").strip(),
+                        api_passphrase=str(right_api_passphrase or "").strip(),
+                        account_profile=dict(right_account_profile or {}),
+                    ),
+                )
+                self.worker_manager.start_worker(task)
+            except Exception as exc:
+                self._logger.error("dual execution worker start failed | worker_id=%s | error=%s", worker_id, exc)
+                self.worker_command_failed.emit(worker_id, str(exc))
+
+        threading.Thread(target=_run, name=f"dual-exec-worker-start-{worker_id}", daemon=True).start()
+
+    def start_spread_entry_runtime_async(
+        self,
+        *,
+        worker_id: str,
+        left_exchange: str,
+        left_market_type: str,
+        left_symbol: str,
+        left_api_key: str,
+        left_api_secret: str,
+        left_api_passphrase: str = "",
+        left_account_profile: dict | None = None,
+        right_exchange: str,
+        right_market_type: str,
+        right_symbol: str,
+        right_api_key: str,
+        right_api_secret: str,
+        right_api_passphrase: str = "",
+        right_account_profile: dict | None = None,
+        entry_threshold: str,
+        max_quote_age_ms: str,
+        max_quote_skew_ms: str,
+        left_qty: str,
+        right_qty: str,
+    ) -> None:
+        self._logger.info(
+            "ui start spread entry runtime requested | worker_id=%s | left=%s:%s:%s | right=%s:%s:%s | entry_threshold=%s",
+            worker_id,
+            left_exchange,
+            left_market_type,
+            left_symbol,
+            right_exchange,
+            right_market_type,
+            right_symbol,
+            entry_threshold,
+        )
+
+        def _run() -> None:
+            try:
+                left_instrument = self._resolve_instrument(left_exchange, left_market_type, left_symbol)
+                right_instrument = self._resolve_instrument(right_exchange, right_market_type, right_symbol)
+                task = WorkerTask(
+                    worker_id=worker_id,
+                    left_instrument=left_instrument,
+                    right_instrument=right_instrument,
+                    entry_threshold=Decimal(str(entry_threshold or "0")),
+                    exit_threshold=Decimal("0"),
+                    target_notional=Decimal("0"),
+                    step_notional=Decimal("0"),
+                    execution_mode="spread_entry_execution",
+                    run_mode="spread_entry_execution",
+                    execution_credentials=None,
+                    left_execution_credentials=ExchangeCredentials(
+                        exchange=str(left_exchange or "").strip().lower(),
+                        api_key=str(left_api_key or "").strip(),
+                        api_secret=str(left_api_secret or "").strip(),
+                        api_passphrase=str(left_api_passphrase or "").strip(),
+                        account_profile=dict(left_account_profile or {}),
+                    ),
+                    right_execution_credentials=ExchangeCredentials(
+                        exchange=str(right_exchange or "").strip().lower(),
+                        api_key=str(right_api_key or "").strip(),
+                        api_secret=str(right_api_secret or "").strip(),
+                        api_passphrase=str(right_api_passphrase or "").strip(),
+                        account_profile=dict(right_account_profile or {}),
+                    ),
+                    runtime_params={
+                        "entry_threshold": str(entry_threshold or "0"),
+                        "max_quote_age_ms": str(max_quote_age_ms or "0"),
+                        "max_quote_skew_ms": str(max_quote_skew_ms or "0"),
+                        "left_qty": str(left_qty or "0"),
+                        "right_qty": str(right_qty or "0"),
+                        "left_price_mode": "top_of_book",
+                        "right_price_mode": "top_of_book",
+                    },
+                )
+                self.worker_manager.start_worker(task)
+            except Exception as exc:
+                self._logger.error("spread entry worker start failed | worker_id=%s | error=%s", worker_id, exc)
+                self.worker_command_failed.emit(worker_id, str(exc))
+
+        threading.Thread(target=_run, name=f"spread-entry-worker-start-{worker_id}", daemon=True).start()
+
     def submit_test_order_async(self, worker_id: str, side: str, submitted_at_ms: int | None = None) -> None:
         self._logger.info(
             "ui submit test order requested | worker_id=%s | side=%s | submitted_at_ms=%s",
@@ -468,6 +666,45 @@ class UiCoordinator(QObject):
                 self.worker_command_failed.emit(worker_id, str(exc))
 
         threading.Thread(target=_run, name=f"worker-order-{worker_id}-{side}", daemon=True).start()
+
+    def submit_dual_test_orders_async(
+        self,
+        *,
+        worker_id: str,
+        left_side: str,
+        right_side: str,
+        left_qty: str,
+        right_qty: str,
+        left_price_mode: str = "top_of_book",
+        right_price_mode: str = "top_of_book",
+        submitted_at_ms: int | None = None,
+    ) -> None:
+        self._logger.info(
+            "ui submit dual test orders requested | worker_id=%s | left=%s:%s | right=%s:%s",
+            worker_id,
+            left_side,
+            left_qty,
+            right_side,
+            right_qty,
+        )
+
+        def _run() -> None:
+            try:
+                self.worker_manager.submit_dual_test_orders(
+                    worker_id,
+                    left_side=left_side,
+                    right_side=right_side,
+                    left_qty=left_qty,
+                    right_qty=right_qty,
+                    left_price_mode=left_price_mode,
+                    right_price_mode=right_price_mode,
+                    submitted_at_ms=submitted_at_ms,
+                )
+            except Exception as exc:
+                self._logger.error("dual worker order failed | worker_id=%s | error=%s", worker_id, exc)
+                self.worker_command_failed.emit(worker_id, str(exc))
+
+        threading.Thread(target=_run, name=f"dual-worker-order-{worker_id}", daemon=True).start()
 
     def prefetch_exchange_instruments(self, exchange: str) -> None:
         for market_type, _title in self.list_market_types(exchange):

@@ -178,9 +178,7 @@ class BitgetAccountConnector:
                 futures_account = first
 
         balance_equity = self._decimal_value((futures_account or {}).get("usdtEquity"))
-        unrealized_pnl = self._decimal_value((futures_account or {}).get("unrealizedPL"))
-        open_positions = self._count_open_positions(positions)
-
+        unrealized_pnl = self._open_positions_unrealized_pnl(positions)
         if balance_equity <= Decimal("0"):
             balance_text = (
                 f"Баланс: {self._fmt_decimal(spot_usdt)} USDT"
@@ -197,8 +195,8 @@ class BitgetAccountConnector:
             exchange="bitget",
             status_text=self._status_text(spot_enabled, futures_enabled),
             balance_text=balance_text,
-            positions_text=f"Позиции: {open_positions}",
-            pnl_text=f"PnL: {self._fmt_decimal(unrealized_pnl)} USDT",
+            positions_text=self._positions_text(positions),
+            pnl_text=self._format_pnl_text(unrealized_pnl, "USDT"),
             spot_enabled=spot_enabled,
             futures_enabled=futures_enabled,
             can_trade=True,
@@ -305,6 +303,52 @@ class BitgetAccountConnector:
             if BitgetAccountConnector._decimal_value(item.get("total")) > Decimal("0"):
                 count += 1
         return count
+
+    @staticmethod
+    def _positions_text(positions: list[dict[str, Any]]) -> str:
+        long_count = 0
+        short_count = 0
+        for item in positions if isinstance(positions, list) else []:
+            if not isinstance(item, dict):
+                continue
+            total = BitgetAccountConnector._decimal_value(item.get("total"))
+            if total <= Decimal("0"):
+                continue
+            hold_side = str(item.get("holdSide", "")).strip().lower()
+            if hold_side == "long":
+                long_count += 1
+            elif hold_side == "short":
+                short_count += 1
+            else:
+                long_count += 1
+        if long_count <= 0 and short_count <= 0:
+            return "Позиции: 0"
+        parts: list[str] = []
+        if long_count > 0:
+            parts.append(f"<span style='color:#22c55e;'>{long_count} лонг</span>")
+        if short_count > 0:
+            parts.append(f"<span style='color:#ef4444;'>{short_count} шорт</span>")
+        return "Позиции: " + "  ".join(parts)
+
+    @staticmethod
+    def _open_positions_unrealized_pnl(positions: list[dict[str, Any]]) -> Decimal:
+        total = Decimal("0")
+        for item in positions if isinstance(positions, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if BitgetAccountConnector._decimal_value(item.get("total")) <= Decimal("0"):
+                continue
+            total += BitgetAccountConnector._decimal_value(item.get("unrealizedPL"))
+        return total
+
+    @classmethod
+    def _format_pnl_text(cls, value: Decimal, unit: str) -> str:
+        formatted = cls._fmt_decimal(value)
+        if value > Decimal("0"):
+            return f"PnL: <span style='color:#22c55e;'>{formatted} {unit}</span>"
+        if value < Decimal("0"):
+            return f"PnL: <span style='color:#ef4444;'>{formatted} {unit}</span>"
+        return f"PnL: {formatted} {unit}"
 
     @staticmethod
     def _decimal_value(value: Any) -> Decimal:

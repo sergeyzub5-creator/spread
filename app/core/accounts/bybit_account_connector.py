@@ -93,15 +93,14 @@ class BybitAccountConnector:
         account_info = wallet_list[0] if isinstance(wallet_list, list) and wallet_list else {}
         total_wallet_balance = self._decimal_value(account_info.get("totalWalletBalance"))
         total_equity = self._decimal_value(account_info.get("totalEquity"))
-        open_positions = self._count_open_positions(positions)
         unrealized_pnl = sum((self._decimal_value(item.get("unrealisedPnl")) for item in positions), Decimal("0"))
         balance_value = total_wallet_balance if total_wallet_balance != Decimal("0") else total_equity
         return ExchangeAccountSnapshot(
             exchange="bybit",
             status_text="Подключено · Futures",
             balance_text=f"Баланс: {self._fmt_decimal(balance_value)} USD",
-            positions_text=f"Позиции: {open_positions}",
-            pnl_text=f"PnL: {self._fmt_decimal(unrealized_pnl)} USD",
+            positions_text=self._positions_text(positions),
+            pnl_text=self._format_pnl_text(unrealized_pnl, "USD"),
             spot_enabled=False,
             futures_enabled=True,
             can_trade=True,
@@ -185,6 +184,37 @@ class BybitAccountConnector:
             if BybitAccountConnector._decimal_value(item.get("size")) > Decimal("0"):
                 count += 1
         return count
+
+    @staticmethod
+    def _positions_text(positions: list[dict[str, Any]]) -> str:
+        long_count = 0
+        short_count = 0
+        for item in positions:
+            side = str(item.get("side", "")).strip().capitalize()
+            size = BybitAccountConnector._decimal_value(item.get("size"))
+            if size <= Decimal("0"):
+                continue
+            if side == "Buy":
+                long_count += 1
+            elif side == "Sell":
+                short_count += 1
+        if long_count <= 0 and short_count <= 0:
+            return "Позиции: 0"
+        parts: list[str] = []
+        if long_count > 0:
+            parts.append(f"<span style='color:#22c55e;'>{long_count} лонг</span>")
+        if short_count > 0:
+            parts.append(f"<span style='color:#ef4444;'>{short_count} шорт</span>")
+        return "Позиции: " + "  ".join(parts)
+
+    @classmethod
+    def _format_pnl_text(cls, value: Decimal, unit: str) -> str:
+        formatted = cls._fmt_decimal(value)
+        if value > Decimal("0"):
+            return f"PnL: <span style='color:#22c55e;'>{formatted} {unit}</span>"
+        if value < Decimal("0"):
+            return f"PnL: <span style='color:#ef4444;'>{formatted} {unit}</span>"
+        return f"PnL: {formatted} {unit}"
 
     @staticmethod
     def _decimal_value(value: Any) -> Decimal:

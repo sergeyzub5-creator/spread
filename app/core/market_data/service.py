@@ -55,6 +55,14 @@ class MarketDataService:
         for callback in list(self._subscribers.get(quote.instrument_id, [])):
             callback(quote)
 
+    def shutdown(self) -> None:
+        self._subscribers.clear()
+        for connector in self._connectors.values():
+            try:
+                connector.close()
+            except Exception:
+                pass
+
     def _handle_raw_quote(self, exchange: str, event: object) -> None:
         if not isinstance(event, dict):
             return

@@ -154,15 +154,15 @@ class BinanceAccountConnector:
 
         if futures_payload is not None:
             wallet_balance = self._decimal_value(futures_payload.get("totalWalletBalance"))
-            unrealized_pnl = self._decimal_value(futures_payload.get("totalUnrealizedProfit"))
-            open_positions = self._count_open_positions(futures_payload.get("positions", []))
+            positions = futures_payload.get("positions", [])
+            unrealized_pnl = self._open_positions_unrealized_pnl(positions)
             can_trade = bool(futures_payload.get("canTrade", True))
             return ExchangeAccountSnapshot(
                 exchange="binance",
                 status_text=self._status_text(spot_enabled, futures_enabled, can_trade),
                 balance_text=f"Баланс: {self._fmt_decimal(wallet_balance)} USDT",
-                positions_text=f"Позиции: {open_positions}",
-                pnl_text=f"PnL: {self._fmt_decimal(unrealized_pnl)} USDT",
+                positions_text=self._positions_text(positions),
+                pnl_text=self._format_pnl_text(unrealized_pnl, "USDT"),
                 spot_enabled=spot_enabled,
                 futures_enabled=futures_enabled,
                 can_trade=can_trade,
@@ -202,7 +202,7 @@ class BinanceAccountConnector:
             status_text=self._status_text(spot_enabled, futures_enabled, can_trade),
             balance_text=balance_text,
             positions_text="Позиции: 0",
-            pnl_text="PnL: 0.00 USDT",
+            pnl_text=self._format_pnl_text(Decimal("0"), "USDT"),
             spot_enabled=spot_enabled,
             futures_enabled=futures_enabled,
             can_trade=can_trade,
@@ -413,6 +413,56 @@ class BinanceAccountConnector:
             if self._decimal_value(position.get("positionAmt")) != Decimal("0"):
                 count += 1
         return count
+
+    def _positions_text(self, positions: Any) -> str:
+        if not isinstance(positions, list):
+            return "Позиции: 0"
+        long_count = 0
+        short_count = 0
+        for position in positions:
+            if not isinstance(position, dict):
+                continue
+            position_amt = self._decimal_value(position.get("positionAmt"))
+            if position_amt == Decimal("0"):
+                continue
+            position_side = str(position.get("positionSide", "")).strip().upper()
+            if position_side == "LONG" or ((not position_side or position_side == "BOTH") and position_amt > 0):
+                long_count += 1
+            elif position_side == "SHORT" or ((not position_side or position_side == "BOTH") and position_amt < 0):
+                short_count += 1
+        return self._format_directional_positions_text(long_count, short_count)
+
+    @staticmethod
+    def _format_directional_positions_text(long_count: int, short_count: int) -> str:
+        if long_count <= 0 and short_count <= 0:
+            return "Позиции: 0"
+        parts: list[str] = []
+        if long_count > 0:
+            parts.append(f"<span style='color:#22c55e;'>{long_count} лонг</span>")
+        if short_count > 0:
+            parts.append(f"<span style='color:#ef4444;'>{short_count} шорт</span>")
+        return "Позиции: " + "  ".join(parts)
+
+    def _open_positions_unrealized_pnl(self, positions: Any) -> Decimal:
+        total = Decimal("0")
+        if not isinstance(positions, list):
+            return total
+        for position in positions:
+            if not isinstance(position, dict):
+                continue
+            if self._decimal_value(position.get("positionAmt")) == Decimal("0"):
+                continue
+            total += self._decimal_value(position.get("unrealizedProfit"))
+        return total
+
+    @classmethod
+    def _format_pnl_text(cls, value: Decimal, unit: str) -> str:
+        formatted = cls._fmt_decimal(value)
+        if value > Decimal("0"):
+            return f"PnL: <span style='color:#22c55e;'>{formatted} {unit}</span>"
+        if value < Decimal("0"):
+            return f"PnL: <span style='color:#ef4444;'>{formatted} {unit}</span>"
+        return f"PnL: {formatted} {unit}"
 
     @staticmethod
     def _futures_instrument_stub(symbol: str) -> InstrumentId:

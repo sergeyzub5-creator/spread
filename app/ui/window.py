@@ -1,12 +1,13 @@
 ﻿from __future__ import annotations
 
-from PySide6.QtCore import QTimer, Qt
+import threading
+
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMainWindow, QMenu, QSizePolicy, QTabWidget, QToolButton, QVBoxLayout, QWidget
 
 from app.ui.i18n import get_language_manager, tr
 from app.ui.tabs.exchanges_mock_tab import ExchangesMockTab
-from app.ui.tabs.runtime_test_tab import RuntimeTestTab
 from app.ui.tabs.spread_mock_tab import SpreadMockTab
 from app.ui.theme import build_app_stylesheet, get_theme_manager, theme_color
 from app.ui.widgets.brand_header import NeonHeader, build_app_icon
@@ -15,6 +16,8 @@ from app.ui.widgets.status_bar import NetworkStatusBar
 
 
 class AppWindow(QMainWindow):
+    shutdown_finished = Signal()
+
     def __init__(self, coordinator=None) -> None:
         super().__init__()
         self.coordinator = coordinator
@@ -24,6 +27,7 @@ class AppWindow(QMainWindow):
         self.theme_manager.theme_changed.connect(self._apply_theme)
         self._shutdown_splash: ShutdownSplash | None = None
         self._closing = False
+        self.shutdown_finished.connect(self._finalize_shutdown)
 
         self.setWindowTitle(tr("app.window_title"))
         self.setWindowIcon(build_app_icon())
@@ -40,17 +44,15 @@ class AppWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.exchanges_tab = ExchangesMockTab(coordinator=self.coordinator)
         self.spread_tab = SpreadMockTab(coordinator=self.coordinator)
-        self.test_tab = RuntimeTestTab(coordinator=self.coordinator)
         self.tabs.addTab(self.exchanges_tab, tr("tab.exchanges"))
         self.tabs.addTab(self.spread_tab, tr("tab.spread"))
-        self.tabs.addTab(self.test_tab, tr("tab.test"))
         self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs)
 
         self.status_bar = NetworkStatusBar()
         layout.addWidget(self.status_bar)
 
-        for tab in (self.exchanges_tab, self.spread_tab, self.test_tab):
+        for tab in (self.exchanges_tab, self.spread_tab):
             tab.action_triggered.connect(self._on_tab_action)
 
         self._apply_theme()
@@ -231,7 +233,6 @@ class AppWindow(QMainWindow):
         self._sync_header_side_widths()
         self.exchanges_tab.apply_theme()
         self.spread_tab.apply_theme()
-        self.test_tab.apply_theme()
         self.status_bar.apply_theme()
 
     @staticmethod
@@ -248,12 +249,10 @@ class AppWindow(QMainWindow):
         self.settings_btn.setText(tr("top.settings"))
         self.tabs.setTabText(0, tr("tab.exchanges"))
         self.tabs.setTabText(1, tr("tab.spread"))
-        self.tabs.setTabText(2, tr("tab.test"))
         self._build_language_menu()
         self._build_settings_menu()
         self.exchanges_tab.retranslate_ui()
         self.spread_tab.retranslate_ui()
-        self.test_tab.retranslate_ui()
         self.status_bar.retranslate_ui()
 
     def _on_tab_changed(self, index: int) -> None:
@@ -277,10 +276,18 @@ class AppWindow(QMainWindow):
 
         if self._shutdown_splash is None:
             self._shutdown_splash = ShutdownSplash()
-        self.status_bar.stop_background_tasks()
-        if self.coordinator is not None:
-            self.coordinator.shutdown()
         self._shutdown_splash.start()
-        self._shutdown_splash.finish()
+        self.status_bar.stop_background_tasks()
+
+        def _shutdown() -> None:
+            if self.coordinator is not None:
+                self.coordinator.shutdown()
+            self.shutdown_finished.emit()
+
+        threading.Thread(target=_shutdown, name="app-shutdown", daemon=True).start()
+
+    def _finalize_shutdown(self) -> None:
+        if self._shutdown_splash is not None:
+            self._shutdown_splash.finish()
         QTimer.singleShot(430, QApplication.instance().quit)
 

@@ -3,12 +3,19 @@
     "left": {
       "exchange": "bitget",
       "market_type": "perpetual",
-      "symbol": null
+      "symbol": "ETHUSDT"
     },
     "right": {
       "exchange": "binance",
-      "market_type": null,
-      "symbol": null
+      "market_type": "perpetual",
+      "symbol": "ETHUSDT"
     }
+  },
+  "spread_strategy": {
+    "spread.entry_threshold": "",
+    "spread.exit_threshold": "0.08",
+    "spread.target_size": "100",
+    "spread.step_size": "20",
+    "spread.max_slippage": "0.02"
   }
 }
