@@ -104,6 +104,13 @@ class BitgetLinearExecutionAdapter(ExecutionAdapter):
         self._private_stream.close()
         self._logger.info("bitget execution adapter closed")
 
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "route": self.ROUTE_NAME,
+            "transport": self._transport.diagnostics(),
+            "private_stream": self._private_stream.diagnostics(),
+        }
+
     def _build_place_order_payload(self, request: ExecutionOrderRequest) -> dict[str, Any]:
         order_type = str(request.order_type).strip().upper()
         params: dict[str, Any] = {

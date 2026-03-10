@@ -17,6 +17,8 @@ class BitgetAccountConnector:
     SWITCH_STATUS_PATH = "/api/v3/account/switch-status"
     PRODUCT_TYPE = "USDT-FUTURES"
     MARGIN_COIN = "USDT"
+    CLOSE_REFRESH_TIMEOUT_SECONDS = 20.0
+    CLOSE_REFRESH_POLL_SECONDS = 0.35
 
     def __init__(self, timeout_seconds: float = 10.0) -> None:
         self._timeout_seconds = float(timeout_seconds)
@@ -112,14 +114,17 @@ class BitgetAccountConnector:
         spot_assets = client.get(self.SPOT_ASSETS_PATH, params={"assetType": "all"}).get("data", [])
         futures_accounts = client.get(self.FUTURES_ACCOUNTS_PATH, params={"productType": self.PRODUCT_TYPE}).get("data", [])
         positions: list[dict[str, Any]] = []
-        for _attempt in range(6):
+        deadline = time.time() + self.CLOSE_REFRESH_TIMEOUT_SECONDS
+        while True:
             positions = client.get(
                 self.FUTURES_POSITIONS_PATH,
                 params={"productType": self.PRODUCT_TYPE, "marginCoin": self.MARGIN_COIN},
             ).get("data", [])
             if self._count_open_positions(positions) == 0:
                 break
-            time.sleep(0.5)
+            if time.time() >= deadline:
+                break
+            time.sleep(self.CLOSE_REFRESH_POLL_SECONDS)
         self._logger.info("bitget snapshot refresh after close completed: open_positions=%s", self._count_open_positions(positions))
         account_profile = self._resolve_account_profile(credentials, client, spot_assets, futures_accounts)
         return self._build_snapshot(spot_assets, futures_accounts, positions, account_profile)

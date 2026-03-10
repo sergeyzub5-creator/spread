@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import random
 import threading
 import time
 import uuid
@@ -36,6 +37,8 @@ class _PendingRequest:
 class BinanceUsdmTradeWebSocketTransport:
     WS_URL = "wss://ws-fapi.binance.com/ws-fapi/v1"
     TIME_URL = "https://fapi.binance.com/fapi/v1/time"
+    CLOSE_JOIN_TIMEOUT_SECONDS = 2.0
+    RECONNECT_BACKOFF_MAX_SECONDS = 60.0
 
     def __init__(
         self,
@@ -58,6 +61,8 @@ class BinanceUsdmTradeWebSocketTransport:
         self._thread: threading.Thread | None = None
         self._connected = False
         self._closing = False
+        self._reconnect_attempts_total = 0
+        self._session_ready = False
         self._opened_event = threading.Event()
         self._connect_error: Exception | None = None
         self._time_offset_ms = 0
@@ -94,8 +99,28 @@ class BinanceUsdmTradeWebSocketTransport:
         with self._lock:
             self._closing = True
             ws_app = self._ws_app
+            thread = self._thread
         if ws_app is not None:
-            ws_app.close()
+            try:
+                ws_app.close()
+            except Exception as exc:
+                self._logger.warning("binance trade ws close request failed: %s", exc)
+        if (
+            thread is not None
+            and thread.is_alive()
+            and thread is not threading.current_thread()
+        ):
+            thread.join(timeout=self.CLOSE_JOIN_TIMEOUT_SECONDS)
+            if thread.is_alive():
+                self._logger.warning(
+                    "binance trade ws thread did not stop within timeout | timeout_seconds=%s",
+                    self.CLOSE_JOIN_TIMEOUT_SECONDS,
+                )
+        with self._lock:
+            self._connected = False
+            self._ws_app = None
+            self._thread = None
+            self._opened_event.set()
         self._fail_all_pending(ExecutionTransportError("binance trade ws closed"))
 
     def on_event(self, callback: Callable[[dict[str, Any]], None]) -> None:
@@ -199,22 +224,50 @@ class BinanceUsdmTradeWebSocketTransport:
         return pending.response
 
     def _run_forever(self) -> None:
-        self._ws_app = websocket.WebSocketApp(
-            self.WS_URL,
-            on_open=lambda ws: self._on_open(),
-            on_message=lambda ws, message: self._on_message(message),
-            on_error=lambda ws, error: self._on_error(error),
-            on_close=lambda ws, status_code, message: self._on_close(status_code, message),
-        )
-        try:
-            self._ws_app.run_forever()
-        except Exception as exc:  # pragma: no cover
-            self._connect_error = exc
-            self._opened_event.set()
-            self._logger.error("binance trade ws loop crashed: %s", exc)
+        backoff_seconds = 1.0
+        while not self._closing:
+            with self._lock:
+                self._session_ready = False
+            self._ws_app = websocket.WebSocketApp(
+                self.WS_URL,
+                on_open=lambda ws: self._on_open(),
+                on_message=lambda ws, message: self._on_message(message),
+                on_error=lambda ws, error: self._on_error(error),
+                on_close=lambda ws, status_code, message: self._on_close(status_code, message),
+            )
+            try:
+                self._ws_app.run_forever()
+            except Exception as exc:  # pragma: no cover
+                if self._connect_error is None:
+                    self._connect_error = exc
+                    self._opened_event.set()
+                self._logger.error("binance trade ws loop crashed: %s", exc)
+            finally:
+                with self._lock:
+                    self._ws_app = None
+            if self._closing:
+                break
+            with self._lock:
+                if not self._connected and self._connect_error is None:
+                    self._connect_error = ExecutionTransportError("binance trade ws run_forever exited without connect")
+                    self._opened_event.set()
+            delay = min(backoff_seconds, self.RECONNECT_BACKOFF_MAX_SECONDS)
+            jitter = random.uniform(0.0, delay * 0.3)
+            self._reconnect_attempts_total += 1
+            self._logger.warning(
+                "binance trade ws reconnect scheduled | delay_seconds=%.2f | attempt=%s",
+                delay + jitter,
+                self._reconnect_attempts_total,
+            )
+            time.sleep(delay + jitter)
+            if self._session_ready:
+                backoff_seconds = 1.0
+            else:
+                backoff_seconds = min(backoff_seconds * 2.0, self.RECONNECT_BACKOFF_MAX_SECONDS)
 
     def _on_open(self) -> None:
         self._connected = True
+        self._session_ready = True
         self._connect_error = None
         self._opened_event.set()
         self._logger.info("binance trade ws connected")
@@ -249,7 +302,9 @@ class BinanceUsdmTradeWebSocketTransport:
         self._fail_all_pending(error if isinstance(error, Exception) else ExecutionTransportError(str(error)))
 
     def _on_close(self, status_code: Any, message: Any) -> None:
-        self._connected = False
+        with self._lock:
+            self._connected = False
+            self._ws_app = None
         self._opened_event.set()
         self._logger.info("binance trade ws closed | code=%s | message=%s", status_code, message)
         if not self._closing:
@@ -261,7 +316,28 @@ class BinanceUsdmTradeWebSocketTransport:
             connected = self._connected
         if ws_app is None or not connected:
             raise ExecutionTransportError("binance trade ws is not connected")
-        ws_app.send(json.dumps(payload))
+        try:
+            ws_app.send(json.dumps(payload))
+        except Exception as exc:
+            # Socket can be dropped asynchronously by network/peer (e.g. SSLEOFError during send).
+            # Mark connection as down and fail request through transport error for controlled reconnect.
+            with self._lock:
+                self._connected = False
+            try:
+                ws_app.close()
+            except Exception:
+                pass
+            raise ExecutionTransportError(f"binance trade ws send failed: {exc}") from exc
+
+    def diagnostics(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "connected": self._connected,
+                "closing": self._closing,
+                "pending_requests": len(self._pending),
+                "time_offset_ms": self._time_offset_ms,
+                "reconnect_attempts_total": self._reconnect_attempts_total,
+            }
 
     def _sign_params(self, params: dict[str, Any]) -> dict[str, Any]:
         normalized = {key: self._normalize_value(value) for key, value in params.items() if value is not None}

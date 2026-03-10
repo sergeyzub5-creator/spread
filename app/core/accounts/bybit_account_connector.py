@@ -13,6 +13,9 @@ from app.core.models.instrument import InstrumentId, InstrumentKey, InstrumentRo
 
 
 class BybitAccountConnector:
+    CLOSE_REFRESH_TIMEOUT_SECONDS = 20.0
+    CLOSE_REFRESH_POLL_SECONDS = 0.35
+
     def __init__(self, timeout_seconds: float = 10.0) -> None:
         self._client_timeout_seconds = float(timeout_seconds)
         self._logger = get_logger("accounts.bybit")
@@ -79,11 +82,14 @@ class BybitAccountConnector:
         client = BybitV5HttpClient(credentials, timeout_seconds=self._client_timeout_seconds)
         wallet_payload = client.get("/v5/account/wallet-balance", params={"accountType": "UNIFIED"}, auth=True)
         positions: list[dict[str, Any]] = []
-        for _attempt in range(6):
+        deadline = time.time() + self.CLOSE_REFRESH_TIMEOUT_SECONDS
+        while True:
             positions = self._load_linear_positions(client)
             if self._count_open_positions(positions) == 0:
                 break
-            time.sleep(0.5)
+            if time.time() >= deadline:
+                break
+            time.sleep(self.CLOSE_REFRESH_POLL_SECONDS)
         self._logger.info("bybit snapshot refresh after close completed: open_positions=%s", self._count_open_positions(positions))
         return self._build_snapshot(wallet_payload, positions)
 

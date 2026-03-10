@@ -3,19 +3,18 @@
     "left": {
       "exchange": "bitget",
       "market_type": "perpetual",
-      "symbol": "ETHUSDT"
+      "symbol": "XRPUSDT"
     },
     "right": {
       "exchange": "binance",
       "market_type": "perpetual",
-      "symbol": "ETHUSDT"
+      "symbol": "XRPUSDT"
     }
   },
   "spread_strategy": {
-    "spread.entry_threshold": "",
-    "spread.exit_threshold": "0.08",
-    "spread.target_size": "100",
-    "spread.step_size": "20",
-    "spread.max_slippage": "0.02"
+    "spread.entry_threshold": "0,3",
+    "spread.exit_threshold": "0,01",
+    "spread.target_size": "30",
+    "spread.entry_min_step_pct": "20"
   }
 }

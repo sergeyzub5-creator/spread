@@ -89,6 +89,13 @@ class BybitLinearExecutionAdapter(ExecutionAdapter):
         self._private_stream.close()
         self._logger.info("bybit execution adapter closed")
 
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "route": self.ROUTE_NAME,
+            "transport": self._transport.diagnostics(),
+            "private_stream": self._private_stream.diagnostics(),
+        }
+
     def _build_place_order_payload(self, request: ExecutionOrderRequest) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "category": "linear",

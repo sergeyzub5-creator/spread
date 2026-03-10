@@ -1,12 +1,13 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from uuid import uuid4
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from app.ui.exchange_catalog import get_exchange_meta
-from app.ui.exchange_store import load_exchange_cards, save_exchange_cards
+from app.ui.exchange_store import load_exchange_cards, resolve_exchange_card_credentials, save_exchange_cards
 from app.ui.i18n import tr
 from app.ui.theme import theme_color
 from app.ui.widgets.add_exchange_dialog import AddExchangeDialog
@@ -24,6 +25,10 @@ class ExchangesMockTab(QWidget):
         self.cards: list[ExchangeCardMock] = []
         self._connect_requests: dict[str, ExchangeCardMock] = {}
         self._close_requests: dict[str, ExchangeCardMock] = {}
+        self._save_cards_timer = QTimer(self)
+        self._save_cards_timer.setSingleShot(True)
+        self._save_cards_timer.setInterval(800)
+        self._save_cards_timer.timeout.connect(self._save_cards)
         self._build_ui()
         self.apply_theme()
         self.retranslate_ui()
@@ -180,10 +185,19 @@ class ExchangesMockTab(QWidget):
 
     @staticmethod
     def _card_credentials(card: ExchangeCardMock) -> dict:
+        api_key = card.api_key_input.text().strip()
+        api_secret = card.api_secret_input.text().strip()
+        api_passphrase = card.passphrase_input.text().strip()
+        if (not api_key or not api_secret) and isinstance(getattr(card, "_stored_payload", None), dict):
+            stored = resolve_exchange_card_credentials(getattr(card, "_stored_payload"))
+            if stored is not None:
+                api_key = str(stored.get("api_key", "")).strip()
+                api_secret = str(stored.get("api_secret", "")).strip()
+                api_passphrase = str(stored.get("api_passphrase", "")).strip()
         return {
-            "api_key": card.api_key_input.text().strip(),
-            "api_secret": card.api_secret_input.text().strip(),
-            "api_passphrase": card.passphrase_input.text().strip(),
+            "api_key": api_key,
+            "api_secret": api_secret,
+            "api_passphrase": api_passphrase,
             "testnet": False,
         }
 
@@ -263,9 +277,6 @@ class ExchangesMockTab(QWidget):
         stored["exchange_code"] = card.exchange_type
         stored["exchange_title"] = card.exchange_meta["title"]
         stored["exchange_name"] = card.exchange_meta["base_name"]
-        stored["api_key"] = card.api_key_input.text().strip()
-        stored["api_secret"] = card.api_secret_input.text().strip()
-        stored["api_passphrase"] = card.passphrase_input.text().strip()
         stored["testnet"] = False
         stored["connected"] = True
         stored["account_snapshot"] = snapshot
@@ -296,7 +307,7 @@ class ExchangesMockTab(QWidget):
             stored["connected"] = True
             stored["account_snapshot"] = snapshot
             card._stored_payload = stored
-            self._save_cards()
+            self._schedule_save_cards()
             break
 
     def _on_exchange_snapshot_update_failed(self, monitor_id: str, exchange_code: str, message: str) -> None:
@@ -333,9 +344,11 @@ class ExchangesMockTab(QWidget):
         stored["exchange_code"] = card.exchange_type
         stored["exchange_title"] = card.exchange_meta["title"]
         stored["exchange_name"] = card.exchange_meta["base_name"]
-        stored["api_key"] = card.api_key_input.text().strip()
-        stored["api_secret"] = card.api_secret_input.text().strip()
-        stored["api_passphrase"] = card.passphrase_input.text().strip()
+        current_credentials = self._card_credentials(card)
+        if current_credentials["api_key"] and current_credentials["api_secret"]:
+            stored["api_key"] = current_credentials["api_key"]
+            stored["api_secret"] = current_credentials["api_secret"]
+            stored["api_passphrase"] = current_credentials["api_passphrase"]
         stored["testnet"] = False
         stored["connected"] = bool(card.is_connected)
         if isinstance(card._snapshot, dict):
@@ -343,7 +356,14 @@ class ExchangesMockTab(QWidget):
         return stored
 
     def _save_cards(self) -> None:
+        if self._save_cards_timer.isActive():
+            self._save_cards_timer.stop()
         save_exchange_cards([self._serialize_card(card) for card in self.cards])
+
+    def _schedule_save_cards(self) -> None:
+        if self._save_cards_timer.isActive():
+            return
+        self._save_cards_timer.start()
 
     def _restore_cards(self) -> None:
         for payload in load_exchange_cards():
@@ -353,10 +373,11 @@ class ExchangesMockTab(QWidget):
             self._create_card(exchange_code, payload)
             if bool(payload.get("connected")):
                 card = self.cards[-1]
+                resolved = resolve_exchange_card_credentials(payload) or {}
                 params = {
-                    "api_key": str(payload.get("api_key", "")).strip(),
-                    "api_secret": str(payload.get("api_secret", "")).strip(),
-                    "api_passphrase": str(payload.get("api_passphrase", "")).strip(),
+                    "api_key": str(resolved.get("api_key", "")).strip(),
+                    "api_secret": str(resolved.get("api_secret", "")).strip(),
+                    "api_passphrase": str(resolved.get("api_passphrase", "")).strip(),
                     "testnet": False,
                 }
                 if params["api_key"] and params["api_secret"]:
@@ -399,4 +420,9 @@ class ExchangesMockTab(QWidget):
         self.close_all_positions_btn.setStyleSheet(self._soft_button_style("warning", bold=True))
         for card in self.cards:
             card.apply_theme()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._save_cards_timer.isActive():
+            self._save_cards()
+        super().closeEvent(event)
 

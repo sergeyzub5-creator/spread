@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 from app.core.events.bus import EventBus
 from app.core.logging.logger_factory import get_logger
 from app.core.market_data.service import MarketDataService
@@ -14,14 +16,17 @@ class WorkerManager:
         self.market_data_service = market_data_service
         self.event_bus = event_bus
         self.logger = get_logger("workers.manager")
+        self._lock = threading.RLock()
         self._workers: dict[str, WorkerRuntime] = {}
 
     def create_worker(self, task: WorkerTask) -> WorkerRuntime:
-        existing = self._workers.get(task.worker_id)
+        with self._lock:
+            existing = self._workers.pop(task.worker_id, None)
         if existing is not None:
             existing.stop()
         runtime = WorkerRuntime(task=task, market_data_service=self.market_data_service, event_bus=self.event_bus)
-        self._workers[task.worker_id] = runtime
+        with self._lock:
+            self._workers[task.worker_id] = runtime
         return runtime
 
     def start_worker(self, task: WorkerTask) -> WorkerRuntime:
@@ -30,18 +35,24 @@ class WorkerManager:
         return runtime
 
     def stop_worker(self, worker_id: str) -> None:
-        runtime = self._workers.get(worker_id)
+        with self._lock:
+            runtime = self._workers.pop(worker_id, None)
         if runtime is None:
             return
         runtime.stop()
-        self._workers.pop(worker_id, None)
 
     def shutdown(self) -> None:
-        for worker_id in list(self._workers.keys()):
-            self.stop_worker(worker_id)
+        with self._lock:
+            worker_ids = list(self._workers.keys())
+        for worker_id in worker_ids:
+            try:
+                self.stop_worker(worker_id)
+            except Exception as exc:
+                self.logger.warning("worker shutdown failed | worker_id=%s | error=%s", worker_id, exc)
 
     def submit_test_order(self, worker_id: str, side: str, submitted_at_ms: int | None = None) -> dict:
-        runtime = self._workers.get(worker_id)
+        with self._lock:
+            runtime = self._workers.get(worker_id)
         if runtime is None:
             raise KeyError(f"Worker not found: {worker_id}")
         return runtime.submit_test_order(side, submitted_at_ms=submitted_at_ms)
@@ -58,7 +69,8 @@ class WorkerManager:
         right_price_mode: str = "top_of_book",
         submitted_at_ms: int | None = None,
     ) -> dict:
-        runtime = self._workers.get(worker_id)
+        with self._lock:
+            runtime = self._workers.get(worker_id)
         if runtime is None:
             raise KeyError(f"Worker not found: {worker_id}")
         return runtime.submit_dual_test_orders(
@@ -71,5 +83,58 @@ class WorkerManager:
             submitted_at_ms=submitted_at_ms,
         )
 
+    def trigger_entry_signal(self, worker_id: str) -> None:
+        with self._lock:
+            runtime = self._workers.get(worker_id)
+        if runtime is None:
+            raise KeyError(f"Worker not found: {worker_id}")
+        runtime.trigger_entry_signal()
+
+    def set_simulated_entry_window(self, worker_id: str, enabled: bool) -> None:
+        with self._lock:
+            runtime = self._workers.get(worker_id)
+        if runtime is None:
+            raise KeyError(f"Worker not found: {worker_id}")
+        runtime.set_simulated_entry_window(enabled)
+
+    def set_simulated_exit_window(self, worker_id: str, enabled: bool) -> None:
+        with self._lock:
+            runtime = self._workers.get(worker_id)
+        if runtime is None:
+            raise KeyError(f"Worker not found: {worker_id}")
+        runtime.set_simulated_exit_window(enabled)
+
+    def set_strategy_signal_mode(self, worker_id: str, mode: str) -> None:
+        with self._lock:
+            runtime = self._workers.get(worker_id)
+        if runtime is None:
+            raise KeyError(f"Worker not found: {worker_id}")
+        runtime.set_strategy_signal_mode(mode)
+
     def get_worker(self, worker_id: str) -> WorkerRuntime | None:
-        return self._workers.get(worker_id)
+        with self._lock:
+            return self._workers.get(worker_id)
+
+    def mark_rebalance_grace_for_exchange(self, exchange: str) -> None:
+        """Mark rebalance grace on every active runtime that touches *exchange*."""
+        exchange = exchange.strip().lower()
+        with self._lock:
+            runtimes = list(self._workers.values())
+        for rt in runtimes:
+            try:
+                left_exch = rt.task.left_instrument.exchange.lower()
+                right_exch = rt.task.right_instrument.exchange.lower()
+                if exchange in (left_exch, right_exch):
+                    rt._mark_rebalance_grace(
+                        leg_name="external",
+                        reason="close_all_positions_initiated",
+                    )
+            except Exception:
+                pass
+
+    def execution_stream_health_snapshot(self, worker_id: str) -> dict:
+        with self._lock:
+            runtime = self._workers.get(worker_id)
+        if runtime is None:
+            return {}
+        return runtime.execution_stream_health_snapshot()

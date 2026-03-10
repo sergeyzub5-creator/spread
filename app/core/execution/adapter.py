@@ -51,5 +51,9 @@ class ExecutionAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def diagnostics(self) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def close(self) -> None:
         raise NotImplementedError

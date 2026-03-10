@@ -18,6 +18,9 @@ except ImportError:  # pragma: no cover
 
 class BitgetSpotPublicConnector(PublicMarketDataConnector):
     WS_URL = "wss://ws.bitget.com/v2/ws/public"
+    STALE_STREAM_TIMEOUT_MS = 30000
+    WATCHDOG_INTERVAL_SECONDS = 5.0
+    PING_INTERVAL_SECONDS = 30.0
 
     def __init__(self) -> None:
         self.logger = get_logger("market_data.bitget_spot")
@@ -29,6 +32,7 @@ class BitgetSpotPublicConnector(PublicMarketDataConnector):
         self._thread: threading.Thread | None = None
         self._ping_thread: threading.Thread | None = None
         self._lock = threading.RLock()
+        self._last_message_ts_ms = 0
 
     def connect(self) -> None:
         if websocket is None:
@@ -86,6 +90,7 @@ class BitgetSpotPublicConnector(PublicMarketDataConnector):
     def _on_open(self) -> None:
         self.logger.info("bitget spot public ws connected")
         self._connected = True
+        self._last_message_ts_ms = int(time.time() * 1000)
         self._start_ping_loop()
         with self._lock:
             args = [self._subscription_arg(instrument) for instrument in self._subscriptions.values()]
@@ -94,6 +99,7 @@ class BitgetSpotPublicConnector(PublicMarketDataConnector):
 
     def _on_message(self, message: str) -> None:
         if str(message).strip().lower() == "pong":
+            self._last_message_ts_ms = int(time.time() * 1000)
             return
         payload = json.loads(message)
         if not isinstance(payload, dict):
@@ -113,6 +119,7 @@ class BitgetSpotPublicConnector(PublicMarketDataConnector):
         book = data[0]
         if not isinstance(book, dict):
             return
+        self._last_message_ts_ms = int(time.time() * 1000)
         with self._lock:
             instrument = self._subscriptions.get((inst_type, channel, inst_id))
         if instrument is None:
@@ -123,7 +130,10 @@ class BitgetSpotPublicConnector(PublicMarketDataConnector):
             "ts_local": int(time.time() * 1000),
         }
         for callback in list(self._callbacks):
-            callback(event)
+            try:
+                callback(event)
+            except Exception as exc:
+                self.logger.error("bitget spot quote callback failed: %s", exc)
 
     def _on_error(self, error: Any) -> None:
         self.logger.error("bitget spot public ws error: %s", error)
@@ -140,22 +150,63 @@ class BitgetSpotPublicConnector(PublicMarketDataConnector):
             self._ping_thread.start()
 
     def _ping_loop(self) -> None:
+        ping_elapsed_seconds = 0.0
         while not self._closing and self._connected:
-            time.sleep(30.0)
+            time.sleep(self.WATCHDOG_INTERVAL_SECONDS)
             if self._closing or not self._connected:
                 return
+            with self._lock:
+                has_subscriptions = bool(self._subscriptions)
+            if not has_subscriptions:
+                continue
+            now_ms = int(time.time() * 1000)
+            last_message_ts_ms = int(self._last_message_ts_ms or 0)
             ws_app = self._ws_app
+            if last_message_ts_ms > 0 and (now_ms - last_message_ts_ms) >= self.STALE_STREAM_TIMEOUT_MS:
+                self.logger.warning(
+                    "bitget spot public ws stale stream detected | silence_ms=%s | action=restart",
+                    now_ms - last_message_ts_ms,
+                )
+                with self._lock:
+                    self._connected = False
+                try:
+                    if ws_app is not None:
+                        ws_app.close()
+                except Exception:
+                    pass
+                return
+            ping_elapsed_seconds += self.WATCHDOG_INTERVAL_SECONDS
+            if ping_elapsed_seconds < self.PING_INTERVAL_SECONDS:
+                continue
+            ping_elapsed_seconds = 0.0
             if ws_app is not None:
                 try:
                     ws_app.send("ping")
                 except Exception:
+                    with self._lock:
+                        self._connected = False
+                    try:
+                        ws_app.close()
+                    except Exception:
+                        pass
                     return
 
     def _send_subscriptions(self, op: str, args: list[dict[str, str]]) -> None:
-        ws_app = self._ws_app
-        if ws_app is None or not args:
+        with self._lock:
+            ws_app = self._ws_app
+            connected = self._connected
+        if ws_app is None or not connected or not args:
             return
-        ws_app.send(json.dumps({"op": op, "args": args}))
+        try:
+            ws_app.send(json.dumps({"op": op, "args": args}))
+        except Exception as exc:
+            self.logger.warning("bitget spot public ws send failed: %s", exc)
+            with self._lock:
+                self._connected = False
+            try:
+                ws_app.close()
+            except Exception:
+                pass
 
     @staticmethod
     def _subscription_arg(instrument: InstrumentId) -> dict[str, str]:

@@ -278,6 +278,15 @@ class BybitLinearTradeWebSocketTransport:
             raise BybitTradeWebSocketError("bybit trade ws is not connected")
         ws_app.send(json.dumps(payload))
 
+    def diagnostics(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "connected": self._connected,
+                "authenticated": self._authenticated,
+                "closing": self._closing,
+                "pending_requests": len(self._pending),
+            }
+
     def _fail_all_pending(self, error: Exception) -> None:
         with self._lock:
             pending_items = list(self._pending.values())

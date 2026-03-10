@@ -22,14 +22,14 @@ def _configure_root_logging() -> None:
         return
 
     handler = logging.StreamHandler()
-    handler.setLevel(logging.WARNING)
+    handler.setLevel(logging.ERROR)
     handler.addFilter(_WorkerIdFilter())
     handler.setFormatter(
         logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | worker_id=%(worker_id)s | %(message)s")
     )
 
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.FileHandler(_SESSION_TRACE_PATH, encoding="utf-8")
+    file_handler = logging.FileHandler(_SESSION_TRACE_PATH, mode="a", encoding="utf-8")
     file_handler.setLevel(logging.INFO)
     file_handler.addFilter(_WorkerIdFilter())
     file_handler.setFormatter(
@@ -62,6 +62,11 @@ def reset_session_trace_log() -> Path:
     root_logger.handlers.clear()
     _CONFIGURED = False
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    for rotated_path in _LOG_DIR.glob(f"{_SESSION_TRACE_PATH.name}.*"):
+        try:
+            rotated_path.unlink()
+        except Exception:
+            pass
     _SESSION_TRACE_PATH.write_text("", encoding="utf-8")
     return _SESSION_TRACE_PATH
 

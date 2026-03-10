@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import random
 import threading
 import time
 from collections.abc import Callable
@@ -23,6 +24,7 @@ class BitgetLinearPrivateExecutionStream:
     WS_URL = "wss://ws.bitget.com/v2/ws/private"
     VERIFY_PATH = "/user/verify"
     PRODUCT_TYPE = "USDT-FUTURES"
+    CLOSE_JOIN_TIMEOUT_SECONDS = 2.0
 
     def __init__(
         self,
@@ -46,6 +48,14 @@ class BitgetLinearPrivateExecutionStream:
         self._opened_event = threading.Event()
         self._auth_event = threading.Event()
         self._connect_error: Exception | None = None
+        self._session_ready = False
+        self._reconnect_attempts_total = 0
+        self._last_disconnect_code: str | None = None
+        self._last_disconnect_message: str | None = None
+        self._last_error_text: str | None = None
+        self._last_ping_ts_ms = 0
+        self._last_pong_ts_ms = 0
+        self._ping_fail_count = 0
 
     def connect(self) -> None:
         if websocket is None:
@@ -54,18 +64,24 @@ class BitgetLinearPrivateExecutionStream:
             if self._thread is not None and self._thread.is_alive() and self._connected and self._authenticated:
                 self._logger.info("bitget private stream reuse existing connection")
                 return
-            self._closing = False
-            self._connected = False
-            self._authenticated = False
-            self._connect_error = None
-            self._opened_event.clear()
-            self._auth_event.clear()
-            self._thread = threading.Thread(target=self._run_forever, name="bitget-linear-private-stream", daemon=True)
-            self._thread.start()
+            if self._thread is not None and self._thread.is_alive():
+                self._logger.info("bitget private stream waiting for active connection attempt")
+            else:
+                self._closing = False
+                self._connected = False
+                self._authenticated = False
+                self._connect_error = None
+                self._opened_event.clear()
+                self._auth_event.clear()
+                self._thread = threading.Thread(target=self._run_forever, name="bitget-linear-private-stream", daemon=True)
+                self._thread.start()
             if self._ping_thread is None or not self._ping_thread.is_alive():
                 self._ping_thread = threading.Thread(target=self._ping_loop, name="bitget-linear-private-ping", daemon=True)
                 self._ping_thread.start()
-            self._logger.info("bitget private stream starting new connection | execution_stack=classic_v2_private_ws")
+            if self._connected and self._authenticated:
+                self._logger.info("bitget private stream reuse existing connection")
+            else:
+                self._logger.info("bitget private stream starting/awaiting connection | execution_stack=classic_v2_private_ws")
 
         if not self._opened_event.wait(timeout=self._timeout_seconds):
             raise RuntimeError("bitget private stream connect timeout")
@@ -83,34 +99,79 @@ class BitgetLinearPrivateExecutionStream:
         with self._lock:
             self._closing = True
             ws_app = self._ws_app
+            thread = self._thread
+            ping_thread = self._ping_thread
         if ws_app is not None:
             ws_app.close()
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=self.CLOSE_JOIN_TIMEOUT_SECONDS)
+        if ping_thread is not None and ping_thread.is_alive() and ping_thread is not threading.current_thread():
+            ping_thread.join(timeout=self.CLOSE_JOIN_TIMEOUT_SECONDS)
+        with self._lock:
+            self._connected = False
+            self._authenticated = False
+            self._ws_app = None
+            self._thread = None
+            self._ping_thread = None
 
     def _run_forever(self) -> None:
-        self._ws_app = websocket.WebSocketApp(
-            self.WS_URL,
-            on_open=lambda ws: self._on_open(),
-            on_message=lambda ws, message: self._on_message(message),
-            on_error=lambda ws, error: self._on_error(error),
-            on_close=lambda ws, code, message: self._on_close(code, message),
-        )
-        try:
-            self._ws_app.run_forever()
-        except Exception as exc:  # pragma: no cover
-            self._connect_error = exc
-            self._opened_event.set()
-            self._auth_event.set()
-            self._logger.error("bitget private stream loop crashed: %s", exc)
+        backoff_seconds = 1.0
+        while not self._closing:
+            with self._lock:
+                self._opened_event.clear()
+                self._auth_event.clear()
+                self._session_ready = False
+                self._ws_app = websocket.WebSocketApp(
+                    self.WS_URL,
+                    on_open=lambda ws: self._on_open(),
+                    on_message=lambda ws, message: self._on_message(message),
+                    on_error=lambda ws, error: self._on_error(error),
+                    on_close=lambda ws, code, message: self._on_close(code, message),
+                )
+            try:
+                self._ws_app.run_forever()
+            except Exception as exc:  # pragma: no cover
+                self._connect_error = exc
+                self._opened_event.set()
+                self._auth_event.set()
+                self._logger.error("bitget private stream loop crashed: %s", exc)
+            finally:
+                with self._lock:
+                    self._ws_app = None
+            if self._closing:
+                break
+            delay = min(backoff_seconds, 15.0)
+            jitter = random.uniform(0.0, delay * 0.3)
+            self._reconnect_attempts_total += 1
+            self._logger.warning("bitget private stream reconnect scheduled | delay_seconds=%.2f", delay + jitter)
+            time.sleep(delay + jitter)
+            if self._session_ready:
+                backoff_seconds = 1.0
+            else:
+                backoff_seconds = min(backoff_seconds * 2.0, 15.0)
 
     def _ping_loop(self) -> None:
         while not self._closing:
             time.sleep(self._ping_interval_seconds)
             if self._closing:
                 return
+            with self._lock:
+                connected = self._connected
+                authenticated = self._authenticated
+                ws_app = self._ws_app
+            if not connected or not authenticated or ws_app is None:
+                continue
             try:
+                self._last_ping_ts_ms = int(time.time() * 1000)
                 self._send_raw("ping")
             except Exception:
-                return
+                self._ping_fail_count += 1
+                with self._lock:
+                    self._connected = False
+                try:
+                    ws_app.close()
+                except Exception:
+                    pass
 
     def _on_open(self) -> None:
         self._connected = True
@@ -120,6 +181,7 @@ class BitgetLinearPrivateExecutionStream:
 
     def _on_message(self, message: str) -> None:
         if str(message).strip().lower() == "pong":
+            self._last_pong_ts_ms = int(time.time() * 1000)
             return
         payload = json.loads(message)
         if not isinstance(payload, dict):
@@ -129,6 +191,7 @@ class BitgetLinearPrivateExecutionStream:
             code = str(payload.get("code", "")).strip()
             if code == "0":
                 self._authenticated = True
+                self._session_ready = True
                 self._auth_event.set()
                 self._subscribe_topics()
                 self._logger.info("bitget private stream authenticated")
@@ -152,7 +215,7 @@ class BitgetLinearPrivateExecutionStream:
         if inst_type != self.PRODUCT_TYPE or channel not in {"orders", "fill"}:
             return
         for event_item in self._normalize_events(channel, payload):
-            self._logger.info(
+            self._logger.debug(
                 "bitget private event received | channel=%s | symbol=%s | order_id=%s | status=%s | exec_type=%s",
                 channel,
                 event_item.symbol,
@@ -261,6 +324,7 @@ class BitgetLinearPrivateExecutionStream:
 
     def _on_error(self, error: Any) -> None:
         self._logger.error("bitget private stream error: %s", error)
+        self._last_error_text = str(error)
         if not self._connected and self._connect_error is None:
             self._connect_error = error if isinstance(error, Exception) else RuntimeError(str(error))
             self._opened_event.set()
@@ -269,9 +333,26 @@ class BitgetLinearPrivateExecutionStream:
     def _on_close(self, code: Any, message: Any) -> None:
         self._connected = False
         self._authenticated = False
+        self._last_disconnect_code = None if code is None else str(code)
+        self._last_disconnect_message = None if message is None else str(message)
         self._opened_event.set()
         self._auth_event.set()
         self._logger.info("bitget private stream closed | code=%s | message=%s", code, message)
+
+    def diagnostics(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "connected": self._connected,
+                "authenticated": self._authenticated,
+                "closing": self._closing,
+                "reconnect_attempts_total": self._reconnect_attempts_total,
+                "last_disconnect_code": self._last_disconnect_code,
+                "last_disconnect_message": self._last_disconnect_message,
+                "last_error_text": self._last_error_text,
+                "last_ping_ts_ms": self._last_ping_ts_ms or None,
+                "last_pong_ts_ms": self._last_pong_ts_ms or None,
+                "ping_fail_count": self._ping_fail_count,
+            }
 
     def _send(self, payload: dict[str, Any]) -> None:
         self._send_raw(json.dumps(payload))
@@ -281,7 +362,11 @@ class BitgetLinearPrivateExecutionStream:
             ws_app = self._ws_app
         if ws_app is None:
             raise RuntimeError("bitget private stream is not connected")
-        ws_app.send(payload)
+        try:
+            ws_app.send(payload)
+        except Exception as exc:
+            self._logger.warning("bitget private stream send failed: %s", exc)
+            raise
 
     @staticmethod
     def _error_message(payload: dict[str, Any]) -> str:

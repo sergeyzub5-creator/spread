@@ -18,6 +18,9 @@ except ImportError:  # pragma: no cover
 
 class BybitLinearPublicConnector(PublicMarketDataConnector):
     WS_URL = "wss://stream.bybit.com/v5/public/linear"
+    STALE_STREAM_TIMEOUT_MS = 30000
+    WATCHDOG_INTERVAL_SECONDS = 5.0
+    PING_INTERVAL_SECONDS = 20.0
 
     def __init__(self) -> None:
         self.logger = get_logger("market_data.bybit_linear")
@@ -27,7 +30,9 @@ class BybitLinearPublicConnector(PublicMarketDataConnector):
         self._closing = False
         self._ws_app = None
         self._thread: threading.Thread | None = None
+        self._watchdog_thread: threading.Thread | None = None
         self._lock = threading.RLock()
+        self._last_message_ts_ms = 0
 
     def connect(self) -> None:
         if websocket is None:
@@ -84,7 +89,9 @@ class BybitLinearPublicConnector(PublicMarketDataConnector):
 
     def _on_open(self) -> None:
         self._connected = True
+        self._last_message_ts_ms = int(time.time() * 1000)
         self.logger.info("bybit public ws connected")
+        self._start_watchdog_loop()
         with self._lock:
             topics = list(self._topic_to_instrument.keys())
         if topics:
@@ -93,6 +100,9 @@ class BybitLinearPublicConnector(PublicMarketDataConnector):
     def _on_message(self, message: str) -> None:
         payload = json.loads(message)
         if not isinstance(payload, dict):
+            return
+        if self._is_pong_message(payload):
+            self._last_message_ts_ms = int(time.time() * 1000)
             return
         topic = str(payload.get("topic", "")).strip()
         if not topic:
@@ -104,9 +114,13 @@ class BybitLinearPublicConnector(PublicMarketDataConnector):
         data = payload.get("data", {})
         if not isinstance(data, dict):
             return
+        self._last_message_ts_ms = int(time.time() * 1000)
         event = {"instrument": instrument, "payload": data, "ts_local": int(time.time() * 1000)}
         for callback in list(self._callbacks):
-            callback(event)
+            try:
+                callback(event)
+            except Exception as exc:
+                self.logger.error("bybit linear quote callback failed: %s", exc)
 
     def _on_error(self, error: Any) -> None:
         self.logger.error("bybit public ws error: %s", error)
@@ -115,11 +129,68 @@ class BybitLinearPublicConnector(PublicMarketDataConnector):
         self._connected = False
         self.logger.info("bybit public ws closed | code=%s | message=%s", code, message)
 
+    def _start_watchdog_loop(self) -> None:
+        with self._lock:
+            if self._watchdog_thread is not None and self._watchdog_thread.is_alive():
+                return
+            self._watchdog_thread = threading.Thread(
+                target=self._watchdog_loop,
+                name="bybit-linear-public-watchdog",
+                daemon=True,
+            )
+            self._watchdog_thread.start()
+
+    def _watchdog_loop(self) -> None:
+        ping_elapsed_seconds = 0.0
+        while not self._closing and self._connected:
+            time.sleep(self.WATCHDOG_INTERVAL_SECONDS)
+            if self._closing or not self._connected:
+                return
+            with self._lock:
+                has_subscriptions = bool(self._topic_to_instrument)
+            if not has_subscriptions:
+                continue
+            now_ms = int(time.time() * 1000)
+            last_message_ts_ms = int(self._last_message_ts_ms or 0)
+            ws_app = self._ws_app
+            if last_message_ts_ms > 0 and (now_ms - last_message_ts_ms) >= self.STALE_STREAM_TIMEOUT_MS:
+                self.logger.warning(
+                    "bybit linear public ws stale stream detected | silence_ms=%s | action=restart",
+                    now_ms - last_message_ts_ms,
+                )
+                with self._lock:
+                    self._connected = False
+                try:
+                    if ws_app is not None:
+                        ws_app.close()
+                except Exception:
+                    pass
+                return
+            ping_elapsed_seconds += self.WATCHDOG_INTERVAL_SECONDS
+            if ping_elapsed_seconds < self.PING_INTERVAL_SECONDS:
+                continue
+            ping_elapsed_seconds = 0.0
+            self._send({"op": "ping"})
+
     def _send(self, payload: dict[str, Any]) -> None:
-        ws_app = self._ws_app
+        with self._lock:
+            ws_app = self._ws_app
         if ws_app is None:
             return
-        ws_app.send(json.dumps(payload))
+        try:
+            ws_app.send(json.dumps(payload))
+        except Exception as exc:
+            self._connected = False
+            self.logger.warning("bybit public ws send failed: %s", exc)
+
+    def _is_pong_message(self, payload: dict[str, Any]) -> bool:
+        op = str(payload.get("op", "")).strip().lower()
+        ret_msg = str(payload.get("ret_msg", "")).strip().lower()
+        if op == "pong":
+            return True
+        if op == "ping" and ret_msg == "pong":
+            return True
+        return False
 
     @staticmethod
     def _topic_name(instrument: InstrumentId) -> str:

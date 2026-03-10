@@ -4,14 +4,11 @@
       "exchange_code": "binance",
       "exchange_title": "Binance Futures",
       "exchange_name": "Binance",
-      "api_key": "WynXIENvlNPKF918Yr9HKADFbLdViuqnbOw9XSLpKSagp2cnQ0EMiCRtusqEutZP",
-      "api_secret": "QDjIloMztioCGZDPI0V3ZynVx3eVpZtSYovJAvdkfdOi0QsRjHbuhzwvDeBv3zAg",
-      "api_passphrase": "",
       "testnet": false,
       "account_snapshot": {
         "exchange": "binance",
         "status_text": "Подключено · Spot + Futures",
-        "balance_text": "Баланс: 8.81 USDT",
+        "balance_text": "Баланс: 8.47 USDT",
         "positions_text": "Позиции: 0",
         "pnl_text": "PnL: 0.00 USDT",
         "spot_enabled": true,
@@ -29,20 +26,20 @@
           ]
         }
       },
-      "connected": true
+      "connected": true,
+      "credential_ref": "22923104fc4046d1b49391ae9a8e799e",
+      "credentials_stored": true,
+      "api_key_masked": "WynX...utZP"
     },
     {
       "exchange_code": "bitget",
       "exchange_title": "Bitget Futures",
       "exchange_name": "Bitget",
-      "api_key": "bg_f45df96c559fb1c3dd517f5d9da0a533",
-      "api_secret": "21a32c3fc36a8509b8007b357051bf6eaf6101864e1f86292715b2cce7be3909",
-      "api_passphrase": "12345678",
       "testnet": false,
       "account_snapshot": {
         "exchange": "bitget",
         "status_text": "Подключено · Spot + Futures",
-        "balance_text": "Баланс: 14.41 USDT",
+        "balance_text": "Баланс: 9.95 USDT",
         "positions_text": "Позиции: 0",
         "pnl_text": "PnL: 0.00 USDT",
         "spot_enabled": true,
@@ -65,7 +62,10 @@
           "raw_switch_status": {}
         }
       },
-      "connected": true
+      "connected": true,
+      "credential_ref": "4c6de51e1e2f475f8bfc3951dac577e2",
+      "credentials_stored": true,
+      "api_key_masked": "bg_f...a533"
     }
   ]
 }

@@ -1,17 +1,21 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import QPoint, QSize, QStringListModel, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFocusEvent, QIcon, QMouseEvent, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QApplication, QCompleter, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton, QSizePolicy, QStyle, QVBoxLayout, QWidget
+from PySide6.QtGui import QAction, QCloseEvent, QColor, QFocusEvent, QIcon, QMouseEvent, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QApplication, QCompleter, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy, QStyle, QVBoxLayout, QWidget
 
-from app.ui.exchange_store import load_exchange_cards
+from app.core.application.spread import SpreadTableService, SpreadView
+from app.ui.exchange_store import load_exchange_cards, resolve_exchange_card_credentials
 from app.ui.i18n import tr
 from app.ui.theme import theme_color
 from app.ui.widgets.exchange_badge import build_exchange_icon
+from app.ui.widgets.runtime_card import RuntimeCard
+from app.ui.windows.diagnostics_window import DiagnosticsWindow
 
 
 class PairLineEdit(QLineEdit):
@@ -58,12 +62,17 @@ class PairLineEdit(QLineEdit):
 class SpreadMockTab(QWidget):
     action_triggered = Signal(str)
     _STATE_PATH = Path(__file__).resolve().parents[2] / "data" / "ui_state.json"
-    _SPREAD_WORKER_ID = "spread_live_runtime"
 
     def __init__(self, coordinator=None, parent=None) -> None:
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.coordinator = coordinator
+        self._spread_service: SpreadTableService | None = None
+        if coordinator is not None and getattr(coordinator, "core_app", None) is not None:
+            try:
+                self._spread_service = coordinator.core_app.get_spread_table_service()
+            except Exception:
+                self._spread_service = None
         self._slot_state = {
             "left": {"exchange": None, "market_type": None, "symbol": None},
             "right": {"exchange": None, "market_type": None, "symbol": None},
@@ -78,17 +87,34 @@ class SpreadMockTab(QWidget):
         self._quote_labels: dict[str, dict[str, QLabel]] = {}
         self._transport_widgets: dict[str, dict[str, object]] = {}
         self._pending_quotes: dict[str, dict] = {}
+        self._latest_public_quotes: dict[str, dict[str, Decimal]] = {}
         self._pending_spread_state: dict | None = None
         self._strategy_field_labels: list[QLabel] = []
         self._strategy_inputs: dict[str, QLineEdit] = {}
         self._spread_value_label: QLabel | None = None
         self._select_button: QPushButton | None = None
+        self._start_button: QPushButton | None = None
+        self._stop_button: QPushButton | None = None
+        self._signal_mode_button: QPushButton | None = None
+        self._simulate_entry_button: QPushButton | None = None
+        self._simulate_exit_button: QPushButton | None = None
         self._strategy_title_label: QLabel | None = None
+        self._entry_status_title_label: QLabel | None = None
+        self._entry_status_labels: dict[str, QLabel] = {}
+        self._diagnostics_window: DiagnosticsWindow | None = None
+        self._runtime_cards: dict[str, RuntimeCard] = {}
+        self._active_worker_id: str | None = None
+        self._runtimes_layout: QVBoxLayout | None = None
+        self._runtime_running = False
+        self._strategy_signal_mode = "market"
+        self._simulated_entry_window_open = False
+        self._simulated_exit_window_open = False
         self._ui_quote_timer = QTimer(self)
-        self._ui_quote_timer.setInterval(50)
+        self._ui_quote_timer.setInterval(200)
         self._ui_quote_timer.timeout.connect(self._flush_pending_quotes)
         self._ui_spread_timer = QTimer(self)
-        self._ui_spread_timer.setInterval(50)
+        self._ui_spread_timer.setInterval(150)
+        self._prev_controls_state: dict[str, object] = {}
         self._ui_spread_timer.timeout.connect(self._flush_pending_spread_state)
         self._build_ui()
         app = QApplication.instance()
@@ -98,9 +124,10 @@ class SpreadMockTab(QWidget):
         self.retranslate_ui()
         if self.coordinator is not None:
             self.coordinator.public_quote_received.connect(self._on_public_quote_received)
-            self.coordinator.public_quote_error.connect(lambda message: self._emit(f"spread:error:{message}"))
+            self.coordinator.public_quote_error.connect(self._on_public_quote_error)
             self.coordinator.instruments_loaded.connect(self._on_instruments_loaded)
             self.coordinator.worker_state_updated.connect(self._on_worker_state_updated)
+            self.coordinator.worker_command_failed.connect(self._on_worker_command_failed)
         self._restore_saved_state()
 
     @staticmethod
@@ -140,7 +167,26 @@ class SpreadMockTab(QWidget):
                 break
         return super().eventFilter(watched, event)
 
+    def closeEvent(self, event: QCloseEvent) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        if self.coordinator is not None:
+            try:
+                self.coordinator.public_quote_received.disconnect(self._on_public_quote_received)
+                self.coordinator.public_quote_error.disconnect(self._on_public_quote_error)
+                self.coordinator.instruments_loaded.disconnect(self._on_instruments_loaded)
+                self.coordinator.worker_state_updated.disconnect(self._on_worker_state_updated)
+                self.coordinator.worker_command_failed.disconnect(self._on_worker_command_failed)
+            except Exception:
+                pass
+        super().closeEvent(event)
+
+    def _on_public_quote_error(self, message: str) -> None:
+        self._emit(f"spread:error:{message}")
+
     def _save_state(self) -> None:
+        self._normalize_strategy_inputs()
         payload = {
             "spread_slots": {
                 slot_name: {
@@ -197,6 +243,8 @@ class SpreadMockTab(QWidget):
             for key, field in self._strategy_inputs.items():
                 if key in strategy_saved:
                     field.setText(str(strategy_saved[key]))
+        self._normalize_strategy_inputs()
+        self._strategy_signal_mode = "market"
         exchanges = dict(self.coordinator.available_quote_exchanges())
         for slot_name in ("left", "right"):
             state = saved.get(slot_name) or {}
@@ -221,6 +269,7 @@ class SpreadMockTab(QWidget):
                 pair_input.mark_selected_value()
                 self._update_pair_clear_action(slot_name)
             self._clear_quotes(slot_name)
+        self._update_runtime_controls()
 
     @staticmethod
     def _format_ui_qty(value: object) -> str:
@@ -762,7 +811,6 @@ class SpreadMockTab(QWidget):
             self._set_symbol(slot_name, symbol, self.coordinator.display_symbol(exchange, market_type, symbol))
 
     def _set_exchange(self, slot_name: str, exchange: str, title: str) -> None:
-        self._stop_spread_runtime()
         if self.coordinator is not None:
             self.coordinator.unsubscribe_public_quote(slot_name)
         self._slot_state[slot_name]["exchange"] = exchange
@@ -782,7 +830,6 @@ class SpreadMockTab(QWidget):
         self._emit(f"spread:exchange:{slot_name}:{exchange}")
 
     def _set_market_type(self, slot_name: str, market_type: str, title: str) -> None:
-        self._stop_spread_runtime()
         if self.coordinator is not None:
             self.coordinator.unsubscribe_public_quote(slot_name)
         self._slot_state[slot_name]["market_type"] = market_type
@@ -800,7 +847,6 @@ class SpreadMockTab(QWidget):
         self._emit(f"spread:market_type:{slot_name}:{market_type}")
 
     def _set_symbol(self, slot_name: str, symbol: str, title: str) -> None:
-        self._stop_spread_runtime()
         self._slot_state[slot_name]["symbol"] = symbol
         pair_input = self._pair_inputs[slot_name]
         pair_input.setText(title)
@@ -813,7 +859,6 @@ class SpreadMockTab(QWidget):
         self._emit(f"spread:instrument:{slot_name}:{symbol}")
 
     def _clear_symbol(self, slot_name: str) -> None:
-        self._stop_spread_runtime()
         if self.coordinator is not None:
             self.coordinator.unsubscribe_public_quote(slot_name)
         self._slot_state[slot_name]["symbol"] = None
@@ -855,6 +900,7 @@ class SpreadMockTab(QWidget):
 
     def _clear_quotes(self, slot_name: str) -> None:
         self._pending_quotes.pop(slot_name, None)
+        self._latest_public_quotes.pop(slot_name, None)
         labels = self._quote_labels.get(slot_name)
         if labels is None:
             return
@@ -866,6 +912,8 @@ class SpreadMockTab(QWidget):
         labels["ask_price"].setText("-")
         labels["bid_qty"].setText("- USDT")
         labels["ask_qty"].setText("- USDT")
+        if not self._runtime_running:
+            self._render_public_quote_spread_view()
 
     def _on_public_quote_received(self, slot_name: str, quote_data: object) -> None:
         if not isinstance(quote_data, dict):
@@ -891,15 +939,19 @@ class SpreadMockTab(QWidget):
         ask_price = quote_data.get("ask", "--")
         bid_qty = quote_data.get("bid_qty", "--")
         ask_qty = quote_data.get("ask_qty", "--")
-        labels["bid_price"].setText(str(bid_price))
-        labels["ask_price"].setText(str(ask_price))
-        labels["bid_qty"].setText(f"{self._format_ui_notional_usdt(bid_price, bid_qty)} USDT")
-        labels["ask_qty"].setText(f"{self._format_ui_notional_usdt(ask_price, ask_qty)} USDT")
-        if self._spread_value_label is not None and self._pending_spread_state is None:
-            left = self._slot_state["left"]["symbol"]
-            right = self._slot_state["right"]["symbol"]
-            if not left or not right:
-                self._spread_value_label.setText("--")
+        self._set_label_text_if_changed(labels["bid_price"], str(bid_price))
+        self._set_label_text_if_changed(labels["ask_price"], str(ask_price))
+        self._set_label_text_if_changed(labels["bid_qty"], f"{self._format_ui_notional_usdt(bid_price, bid_qty)} USDT")
+        self._set_label_text_if_changed(labels["ask_qty"], f"{self._format_ui_notional_usdt(ask_price, ask_qty)} USDT")
+        bid_decimal = self._decimal_or_none(bid_price)
+        ask_decimal = self._decimal_or_none(ask_price)
+        if bid_decimal is not None and ask_decimal is not None:
+            self._latest_public_quotes[slot_name] = {
+                "bid": bid_decimal,
+                "ask": ask_decimal,
+            }
+        if not self._runtime_running and self._pending_spread_state is None:
+            self._render_public_quote_spread_view()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -933,6 +985,33 @@ class SpreadMockTab(QWidget):
         select_btn.clicked.connect(self._subscribe_both)
         self._select_button = select_btn
         inner_layout.addWidget(select_btn)
+        start_btn = QPushButton()
+        start_btn.setObjectName("spreadActionButton")
+        start_btn.clicked.connect(self._start_selected_spread_runtime)
+        self._start_button = start_btn
+        stop_btn = QPushButton()
+        stop_btn.setObjectName("spreadActionButton")
+        stop_btn.clicked.connect(self._stop_spread_runtime)
+        self._stop_button = stop_btn
+        inner_layout.addWidget(stop_btn)
+        signal_mode_btn = QPushButton()
+        signal_mode_btn.setObjectName("spreadModeButton")
+        signal_mode_btn.setCheckable(True)
+        signal_mode_btn.clicked.connect(self._toggle_strategy_signal_mode)
+        self._signal_mode_button = signal_mode_btn
+        inner_layout.addWidget(signal_mode_btn)
+        simulate_entry_btn = QPushButton()
+        simulate_entry_btn.setObjectName("spreadSimulationButton")
+        simulate_entry_btn.setCheckable(True)
+        simulate_entry_btn.clicked.connect(self._toggle_simulated_entry_window)
+        self._simulate_entry_button = simulate_entry_btn
+        inner_layout.addWidget(simulate_entry_btn)
+        simulate_exit_btn = QPushButton()
+        simulate_exit_btn.setObjectName("spreadSimulationButton")
+        simulate_exit_btn.setCheckable(True)
+        simulate_exit_btn.clicked.connect(self._toggle_simulated_exit_window)
+        self._simulate_exit_button = simulate_exit_btn
+        inner_layout.addWidget(simulate_exit_btn)
         value_label = QLabel("--")
         value_label.setObjectName("spreadValueLabel")
         value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -964,9 +1043,8 @@ class SpreadMockTab(QWidget):
         fields = (
             ("spread.entry_threshold", "0.20"),
             ("spread.exit_threshold", "0.08"),
-            ("spread.target_size", "100"),
-            ("spread.step_size", "20"),
-            ("spread.max_slippage", "0.02"),
+            ("spread.target_size", "10"),
+            ("spread.entry_min_step_pct", "20"),
         )
         for idx, (label_key, value) in enumerate(fields):
             cell = QFrame()
@@ -992,15 +1070,39 @@ class SpreadMockTab(QWidget):
             cell_layout.addWidget(divider, 0)
             cell_layout.addWidget(edit, 0)
             grid.addWidget(cell, 0, idx)
+        start_btn.setFixedHeight(32)
+        start_btn.setMinimumWidth(90)
+        grid.addWidget(start_btn, 0, len(fields))
         strategy_layout.addLayout(grid)
         layout.addWidget(strategy)
-        layout.addStretch(1)
+
+        runtimes_scroll = QScrollArea()
+        runtimes_scroll.setWidgetResizable(True)
+        runtimes_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        runtimes_scroll.setObjectName("runtimesScroll")
+        runtimes_container = QWidget()
+        self._runtimes_layout = QVBoxLayout(runtimes_container)
+        self._runtimes_layout.setContentsMargins(0, 0, 0, 0)
+        self._runtimes_layout.setSpacing(8)
+        self._runtimes_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._runtimes_layout.addStretch(1)
+        runtimes_scroll.setWidget(runtimes_container)
+        layout.addWidget(runtimes_scroll, 1)
 
     def _subscribe_both(self) -> None:
         self._subscribe_slot("left")
         self._subscribe_slot("right")
-        self._start_spread_runtime()
         self._emit("spread:select")
+
+    def _start_selected_spread_runtime(self) -> None:
+        self._subscribe_slot("left")
+        self._subscribe_slot("right")
+        self._start_spread_runtime()
+        self._emit("spread:start_runtime")
+
+    @staticmethod
+    def _make_worker_id(left_exchange: str, left_symbol: str, right_exchange: str, right_symbol: str) -> str:
+        return f"spread_{left_exchange}_{left_symbol}__{right_exchange}_{right_symbol}".lower()
 
     def _start_spread_runtime(self) -> None:
         if self.coordinator is None:
@@ -1009,31 +1111,188 @@ class SpreadMockTab(QWidget):
         right = self._slot_state["right"]
         if not all((left["exchange"], left["market_type"], left["symbol"], right["exchange"], right["market_type"], right["symbol"])):
             self._set_spread_label_idle()
+            self._update_runtime_controls()
             return
-        self.coordinator.start_dual_quotes_runtime_async(
-            worker_id=self._SPREAD_WORKER_ID,
+
+        worker_id = self._make_worker_id(
+            str(left["exchange"]), str(left["symbol"]),
+            str(right["exchange"]), str(right["symbol"]),
+        )
+        if worker_id in self._runtime_cards:
+            return
+
+        left_credentials = self._find_connected_exchange_credentials(str(left["exchange"]))
+        right_credentials = self._find_connected_exchange_credentials(str(right["exchange"]))
+        strategy_params = self._current_strategy_params()
+
+        card_params = {
+            "entry_threshold": str(strategy_params.get("spread.entry_threshold") or "0"),
+            "exit_threshold": str(strategy_params.get("spread.exit_threshold") or "0"),
+            "entry_notional_usdt": str(strategy_params.get("spread.target_size") or "0"),
+            "entry_min_step_pct": str(strategy_params.get("spread.entry_min_step_pct") or "20"),
+            "strategy_signal_mode": self._strategy_signal_mode,
+        }
+
+        if (
+            left_credentials is not None
+            and right_credentials is not None
+            and str(left["market_type"]) == "perpetual"
+            and str(right["market_type"]) == "perpetual"
+            and self._has_active_execution_route(str(left["exchange"]))
+            and self._has_active_execution_route(str(right["exchange"]))
+        ):
+            self.coordinator.start_spread_entry_runtime_async(
+                worker_id=worker_id,
+                left_exchange=str(left["exchange"]),
+                left_market_type=str(left["market_type"]),
+                left_symbol=str(left["symbol"]),
+                left_api_key=str(left_credentials["api_key"]),
+                left_api_secret=str(left_credentials["api_secret"]),
+                left_api_passphrase=str(left_credentials["api_passphrase"]),
+                left_account_profile=dict(left_credentials.get("account_profile") or {}),
+                right_exchange=str(right["exchange"]),
+                right_market_type=str(right["market_type"]),
+                right_symbol=str(right["symbol"]),
+                right_api_key=str(right_credentials["api_key"]),
+                right_api_secret=str(right_credentials["api_secret"]),
+                right_api_passphrase=str(right_credentials["api_passphrase"]),
+                right_account_profile=dict(right_credentials.get("account_profile") or {}),
+                entry_threshold=card_params["entry_threshold"],
+                exit_threshold=card_params["exit_threshold"],
+                max_quote_age_ms="2500",
+                max_quote_skew_ms="0",
+                entry_notional_usdt=card_params["entry_notional_usdt"],
+                entry_min_step_pct=card_params["entry_min_step_pct"],
+                strategy_signal_mode=card_params["strategy_signal_mode"],
+            )
+        else:
+            self.coordinator.start_dual_quotes_runtime_async(
+                worker_id=worker_id,
+                left_exchange=str(left["exchange"]),
+                left_market_type=str(left["market_type"]),
+                left_symbol=str(left["symbol"]),
+                right_exchange=str(right["exchange"]),
+                right_market_type=str(right["market_type"]),
+                right_symbol=str(right["symbol"]),
+            )
+
+        self._active_worker_id = worker_id
+        self._add_runtime_card(
+            worker_id,
             left_exchange=str(left["exchange"]),
-            left_market_type=str(left["market_type"]),
             left_symbol=str(left["symbol"]),
             right_exchange=str(right["exchange"]),
-            right_market_type=str(right["market_type"]),
             right_symbol=str(right["symbol"]),
+            params=card_params,
         )
 
+    def _add_runtime_card(
+        self,
+        worker_id: str,
+        *,
+        left_exchange: str,
+        left_symbol: str,
+        right_exchange: str,
+        right_symbol: str,
+        params: dict[str, str],
+    ) -> None:
+        card = RuntimeCard(
+            worker_id,
+            left_exchange=left_exchange,
+            left_symbol=left_symbol,
+            right_exchange=right_exchange,
+            right_symbol=right_symbol,
+            params=params,
+        )
+        card.stop_clicked.connect(self._stop_runtime_by_id)
+        self._runtime_cards[worker_id] = card
+        if self._runtimes_layout is not None:
+            self._runtimes_layout.insertWidget(0, card)
+
     def _stop_spread_runtime(self) -> None:
+        if self._active_worker_id is not None:
+            self._stop_runtime_by_id(self._active_worker_id)
+
+    def _stop_runtime_by_id(self, worker_id: str) -> None:
         if self.coordinator is not None:
-            self.coordinator.stop_test_runtime(self._SPREAD_WORKER_ID)
-        self._pending_spread_state = None
-        if self._ui_spread_timer.isActive():
-            self._ui_spread_timer.stop()
-        self._set_spread_label_idle()
+            self.coordinator.stop_test_runtime(worker_id)
+        card = self._runtime_cards.pop(worker_id, None)
+        if card is not None:
+            card.setParent(None)
+            card.deleteLater()
+        if self._active_worker_id == worker_id:
+            remaining = list(self._runtime_cards.keys())
+            self._active_worker_id = remaining[-1] if remaining else None
+        if not self._runtime_cards:
+            self._runtime_running = False
+            self._simulated_entry_window_open = False
+            self._simulated_exit_window_open = False
+            self._pending_spread_state = None
+            if self._ui_spread_timer.isActive():
+                self._ui_spread_timer.stop()
+            self._set_spread_label_idle()
+        self._update_runtime_controls()
+        self._emit("spread:stop_runtime")
+
+    def _toggle_simulated_entry_window(self) -> None:
+        if self.coordinator is None or self._active_worker_id is None:
+            return
+        enabled = bool(self._simulate_entry_button is not None and self._simulate_entry_button.isChecked())
+        self.coordinator.set_simulated_entry_window_async(self._active_worker_id, enabled)
+        self._emit(f"spread:simulate_entry:{'on' if enabled else 'off'}")
+
+    def _toggle_strategy_signal_mode(self) -> None:
+        enabled = bool(self._signal_mode_button is not None and self._signal_mode_button.isChecked())
+        self._strategy_signal_mode = "simulated" if enabled else "market"
+        if self._strategy_signal_mode != "simulated":
+            self._simulated_entry_window_open = False
+            self._simulated_exit_window_open = False
+        self._save_state()
+        if self.coordinator is not None and self._runtime_running and self._active_worker_id is not None:
+            self.coordinator.set_strategy_signal_mode_async(self._active_worker_id, self._strategy_signal_mode)
+        self._update_runtime_controls()
+        self._emit(f"spread:signal_mode:{self._strategy_signal_mode}")
+
+    def _toggle_simulated_exit_window(self) -> None:
+        if self.coordinator is None or self._active_worker_id is None:
+            return
+        enabled = bool(self._simulate_exit_button is not None and self._simulate_exit_button.isChecked())
+        self.coordinator.set_simulated_exit_window_async(self._active_worker_id, enabled)
+        self._emit(f"spread:simulate_exit:{'on' if enabled else 'off'}")
 
     def _on_worker_state_updated(self, worker_id: str, state: object) -> None:
-        if worker_id != self._SPREAD_WORKER_ID or not isinstance(state, dict):
+        if not isinstance(state, dict):
             return
-        self._pending_spread_state = dict(state)
+        if worker_id not in self._runtime_cards:
+            return
+        is_running = str(state.get("status") or "").strip().lower() == "running"
+        metrics = state.get("metrics") if isinstance(state.get("metrics"), dict) else {}
+        card = self._runtime_cards.get(worker_id)
+        if card is not None:
+            activity_status = str(metrics.get("activity_status") or ("WAITING_ENTRY" if is_running else "STOPPED"))
+            stream_health = str(metrics.get("execution_stream_health_status") or "UNKNOWN")
+            card.update_status(activity_status, stream_health)
+            card.update_volume(str(metrics.get("current_position_notional_usdt") or "0"))
+        if worker_id != self._active_worker_id:
+            return
+        self._runtime_running = is_running
+        self._strategy_signal_mode = "simulated" if str(metrics.get("strategy_signal_mode") or "").strip().lower() == "simulated" else "market"
+        self._simulated_entry_window_open = bool(metrics.get("simulated_entry_window_open"))
+        self._simulated_exit_window_open = bool(metrics.get("simulated_exit_window_open"))
+        self._update_runtime_controls()
+        self._pending_spread_state = state
         if not self._ui_spread_timer.isActive():
             self._ui_spread_timer.start()
+
+    def _on_worker_command_failed(self, worker_id: str, message: str) -> None:
+        if worker_id not in self._runtime_cards:
+            return
+        if worker_id == self._active_worker_id:
+            self._runtime_running = False
+            self._simulated_entry_window_open = False
+            self._simulated_exit_window_open = False
+            self._update_runtime_controls()
+        self._emit(f"spread:error:{message}")
 
     def _flush_pending_spread_state(self) -> None:
         if self._pending_spread_state is None:
@@ -1044,35 +1303,251 @@ class SpreadMockTab(QWidget):
         self._render_spread_state(state)
 
     def _render_spread_state(self, state: dict) -> None:
-        metrics = state.get("metrics", {}) if isinstance(state.get("metrics"), dict) else {}
         if self._spread_value_label is None:
             return
-        spread_state = str(metrics.get("spread_state") or "WAITING_QUOTES")
-        edge_1 = self._decimal_or_none(metrics.get("edge_1"))
-        edge_2 = self._decimal_or_none(metrics.get("edge_2"))
-        if spread_state == "LIVE":
-            active_edge = max((value for value in (edge_1, edge_2) if value is not None), default=None)
-            if edge_1 is not None and (edge_2 is None or edge_1 >= edge_2):
-                self._set_exchange_tones(right_slot_cheap=True)
-            elif edge_2 is not None:
-                self._set_exchange_tones(right_slot_cheap=False)
-            else:
-                self._set_exchange_tones(None)
-            self._spread_value_label.setText(self._format_spread_percent(active_edge))
+        view = self._build_spread_view(state)
+        entry_values = self._enrich_entry_status_values(state, view.entry_values)
+        if view.edge_tone == "right_cheap":
+            self._set_exchange_tones(right_slot_cheap=True)
+        elif view.edge_tone == "left_cheap":
+            self._set_exchange_tones(right_slot_cheap=False)
         else:
             self._set_exchange_tones(None)
-            self._spread_value_label.setText("--")
+        self._spread_value_label.setText(view.spread_value_text)
+        self._apply_entry_values(entry_values)
+        metrics = state.get("metrics") if isinstance(state.get("metrics"), dict) else {}
+        self._apply_execution_stream_health_tone(str(metrics.get("execution_stream_health_status") or "UNKNOWN"))
 
     def _set_spread_label_idle(self) -> None:
         self._set_exchange_tones(None)
         if self._spread_value_label is not None:
             self._spread_value_label.setText("--")
+        self._apply_entry_values(
+            {
+                "spread.status.phase_value": "--",
+                "spread.status.block_value": "--",
+                "spread.status.cycle_value": "--",
+                "spread.status.recovery_hedge_value": "--",
+                "spread.status.global_hedge_value": "--",
+                "spread.status.exec_connected_value": "--",
+                "spread.status.exec_auth_value": "--",
+                "spread.status.exec_reconnects_value": "--",
+                "spread.status.exec_last_error_value": "--",
+                "spread.status.left_order_value": "--",
+                "spread.status.left_position_value": "--",
+                "spread.status.left_notional_value": "--",
+                "spread.status.left_timing_value": "--",
+                "spread.status.right_order_value": "--",
+                "spread.status.right_position_value": "--",
+                "spread.status.right_notional_value": "--",
+                "spread.status.right_timing_value": "--",
+            }
+        )
+        self._apply_execution_stream_health_tone("UNKNOWN")
+
+    def _render_public_quote_spread_view(self) -> None:
+        if self._spread_value_label is None:
+            return
+        left_quote = self._latest_public_quotes.get("left")
+        right_quote = self._latest_public_quotes.get("right")
+        if left_quote is None or right_quote is None:
+            self._set_spread_label_idle()
+            return
+        left_bid = left_quote.get("bid")
+        left_ask = left_quote.get("ask")
+        right_bid = right_quote.get("bid")
+        right_ask = right_quote.get("ask")
+        edge_1 = self._safe_edge(left_bid, right_ask)
+        edge_2 = self._safe_edge(right_bid, left_ask)
+        best_edge = None
+        direction = "--"
+        edge_tone: str | None = None
+        if edge_1 is not None and (edge_2 is None or edge_1 >= edge_2):
+            best_edge = edge_1
+            direction = "LEFT_SELL_RIGHT_BUY"
+            edge_tone = "right_cheap"
+        elif edge_2 is not None:
+            best_edge = edge_2
+            direction = "LEFT_BUY_RIGHT_SELL"
+            edge_tone = "left_cheap"
+        self._spread_value_label.setText(self._format_spread_percent(best_edge))
+        if edge_tone == "right_cheap":
+            self._set_exchange_tones(right_slot_cheap=True)
+        elif edge_tone == "left_cheap":
+            self._set_exchange_tones(right_slot_cheap=False)
+        else:
+            self._set_exchange_tones(None)
+        self._apply_entry_values(
+            {
+                "spread.status.phase_value": tr("spread.activity.waiting_entry"),
+                "spread.status.block_value": "Нет",
+                "spread.status.cycle_value": "--",
+                "spread.status.recovery_hedge_value": "--",
+                "spread.status.global_hedge_value": "--",
+                "spread.status.exec_connected_value": "--",
+                "spread.status.exec_auth_value": "--",
+                "spread.status.exec_reconnects_value": "--",
+                "spread.status.exec_last_error_value": "--",
+                "spread.status.left_order_value": "--",
+                "spread.status.left_position_value": "--",
+                "spread.status.left_notional_value": "--",
+                "spread.status.left_timing_value": "--",
+                "spread.status.right_order_value": "--",
+                "spread.status.right_position_value": "--",
+                "spread.status.right_notional_value": "--",
+                "spread.status.right_timing_value": "--",
+            }
+        )
+
+    def _update_runtime_controls(self) -> None:
+        ready = all(
+            (
+                self._slot_state["left"]["exchange"],
+                self._slot_state["left"]["market_type"],
+                self._slot_state["left"]["symbol"],
+                self._slot_state["right"]["exchange"],
+                self._slot_state["right"]["market_type"],
+                self._slot_state["right"]["symbol"],
+            )
+        )
+        current_pair_id = self._make_worker_id(
+            str(self._slot_state["left"]["exchange"] or ""),
+            str(self._slot_state["left"]["symbol"] or ""),
+            str(self._slot_state["right"]["exchange"] or ""),
+            str(self._slot_state["right"]["symbol"] or ""),
+        ) if ready else ""
+        pair_already_running = current_pair_id in self._runtime_cards
+        sim_enabled = self._runtime_running and self._strategy_signal_mode == "simulated"
+        is_simulated = self._strategy_signal_mode == "simulated"
+        stop_enabled = self._active_worker_id is not None and self._runtime_running
+        start_enabled = bool(ready) and not pair_already_running
+
+        new_state: dict[str, object] = {
+            "start": start_enabled,
+            "stop": stop_enabled,
+            "sim_entry_chk": self._simulated_entry_window_open,
+            "sim_entry_en": sim_enabled,
+            "sim_exit_chk": self._simulated_exit_window_open,
+            "sim_exit_en": sim_enabled,
+            "mode_chk": is_simulated,
+            "mode": self._strategy_signal_mode,
+        }
+        if new_state == self._prev_controls_state:
+            return
+        self._prev_controls_state = new_state
+
+        self._update_signal_mode_button_text()
+        if self._select_button is not None:
+            self._select_button.setEnabled(True)
+        if self._start_button is not None:
+            self._start_button.setEnabled(start_enabled)
+        if self._stop_button is not None:
+            self._stop_button.setEnabled(stop_enabled)
+        if self._simulate_entry_button is not None:
+            self._simulate_entry_button.blockSignals(True)
+            self._simulate_entry_button.setChecked(self._simulated_entry_window_open)
+            self._simulate_entry_button.blockSignals(False)
+            self._simulate_entry_button.setEnabled(sim_enabled)
+        if self._simulate_exit_button is not None:
+            self._simulate_exit_button.blockSignals(True)
+            self._simulate_exit_button.setChecked(self._simulated_exit_window_open)
+            self._simulate_exit_button.blockSignals(False)
+            self._simulate_exit_button.setEnabled(sim_enabled)
+        if self._signal_mode_button is not None:
+            self._signal_mode_button.blockSignals(True)
+            self._signal_mode_button.setChecked(is_simulated)
+            self._signal_mode_button.blockSignals(False)
+            self._signal_mode_button.setEnabled(True)
 
     def _current_strategy_params(self) -> dict[str, str]:
+        self._normalize_strategy_inputs()
         return {
             key: field.text().strip()
             for key, field in self._strategy_inputs.items()
         }
+
+    def _normalize_strategy_inputs(self) -> None:
+        target_field = self._strategy_inputs.get("spread.target_size")
+        if target_field is not None:
+            target_field.setText(self._normalize_target_size_text(target_field.text()))
+        min_step_field = self._strategy_inputs.get("spread.entry_min_step_pct")
+        if min_step_field is not None:
+            min_step_field.setText(self._normalize_min_step_percent_text(min_step_field.text()))
+
+    @staticmethod
+    def _normalize_target_size_text(value: str) -> str:
+        text = str(value or "").strip().replace(" ", "").replace(",", ".")
+        try:
+            normalized = Decimal(text)
+        except Exception:
+            normalized = Decimal("10")
+        if normalized < Decimal("10"):
+            normalized = Decimal("10")
+        if normalized == normalized.to_integral_value():
+            return str(normalized.quantize(Decimal("1")))
+        return format(normalized.normalize(), "f").rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _normalize_min_step_percent_text(value: str) -> str:
+        text = str(value or "").strip().replace(" ", "").replace(",", ".")
+        try:
+            normalized = Decimal(text)
+        except Exception:
+            normalized = Decimal("20")
+        if normalized < Decimal("10"):
+            normalized = Decimal("10")
+        if normalized > Decimal("100"):
+            normalized = Decimal("100")
+        if normalized == normalized.to_integral_value():
+            return str(normalized.quantize(Decimal("1")))
+        return format(normalized.normalize(), "f").rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _find_connected_exchange_credentials(exchange_code: str) -> dict[str, object] | None:
+        normalized = str(exchange_code or "").strip().lower()
+        for card in load_exchange_cards():
+            if str(card.get("exchange_code", "")).strip().lower() != normalized:
+                continue
+            if not bool(card.get("connected")):
+                continue
+            resolved = resolve_exchange_card_credentials(card) or {}
+            api_key = str(resolved.get("api_key", "")).strip()
+            api_secret = str(resolved.get("api_secret", "")).strip()
+            if not api_key or not api_secret:
+                continue
+            return {
+                "api_key": api_key,
+                "api_secret": api_secret,
+                "api_passphrase": str(resolved.get("api_passphrase", "")).strip(),
+                "account_profile": dict(card.get("account_snapshot", {}).get("account_profile", {}) or {}),
+            }
+        return None
+
+    def _has_active_execution_route(self, exchange_code: str) -> bool:
+        state = self._transport_state_for_exchange(exchange_code)
+        return bool(state.get("ws", {}).get("active")) or bool(state.get("rest", {}).get("active"))
+
+    def _apply_entry_values(self, entry_values: dict[str, str]) -> None:
+        if self._diagnostics_window is not None:
+            self._diagnostics_window.apply_entry_values(entry_values)
+
+    def _apply_execution_stream_health_tone(self, status: str) -> None:
+        if self._diagnostics_window is not None:
+            self._diagnostics_window.apply_execution_stream_health_tone(status)
+
+    def _open_diagnostics_window(self) -> None:
+        if self._diagnostics_window is None:
+            self._diagnostics_window = DiagnosticsWindow(self)
+            self._entry_status_labels = self._diagnostics_window.status_labels
+        self._diagnostics_window.show()
+        self._diagnostics_window.raise_()
+        self._diagnostics_window.activateWindow()
+
+    @staticmethod
+    def _set_label_text_if_changed(label: QLabel, value: str) -> None:
+        if label.text() == value:
+            return
+        label.setText(value)
 
     def _set_exchange_tones(self, right_slot_cheap: bool | None) -> None:
         left_button = self._exchange_buttons.get("left")
@@ -1113,6 +1588,160 @@ class SpreadMockTab(QWidget):
         frame.style().polish(frame)
         frame.update()
 
+    def _build_spread_view(self, state: dict[str, Any] | None) -> SpreadView:
+        """
+        Delegate spread view construction to the application-layer service.
+
+        If for any reason the service is unavailable, fall back to a local
+        implementation that mirrors the previous behaviour.
+        """
+        service_spread_value_text = "--"
+        service_edge_tone: str | None = None
+        if self._spread_service is not None:
+            try:
+                service_view = self._spread_service.build_view_from_worker_state(state or {})
+                service_spread_value_text = service_view.spread_value_text
+                service_edge_tone = service_view.edge_tone
+            except Exception:
+                service_spread_value_text = "--"
+                service_edge_tone = None
+
+        # Fallback: preserve previous in-widget logic.
+        if not isinstance(state, dict):
+            metrics: dict[str, Any] = {}
+        else:
+            raw_metrics = state.get("metrics")
+            metrics = raw_metrics if isinstance(raw_metrics, dict) else {}
+
+        spread_state = str(metrics.get("spread_state") or "WAITING_QUOTES")
+        edge_1 = self._decimal_or_none(metrics.get("edge_1"))
+        edge_2 = self._decimal_or_none(metrics.get("edge_2"))
+
+        spread_value_text = service_spread_value_text
+        edge_tone: str | None = service_edge_tone
+
+        if spread_value_text == "--" and spread_state == "LIVE":
+            active_edge = max((value for value in (edge_1, edge_2) if value is not None), default=None)
+            if edge_1 is not None and (edge_2 is None or edge_1 >= edge_2):
+                edge_tone = "right_cheap"
+            elif edge_2 is not None:
+                edge_tone = "left_cheap"
+            if active_edge is not None:
+                spread_value_text = self._format_spread_percent(active_edge)
+
+        block_reason = str(metrics.get("entry_block_reason") or "").strip()
+        entry_cycle_state = str(metrics.get("active_entry_cycle_state") or "").strip()
+        exit_cycle_state = str(metrics.get("active_exit_cycle_state") or "").strip()
+        cycle_status = " | ".join(
+            value for value in (
+                f"Вход: {entry_cycle_state}" if entry_cycle_state else "",
+                f"Выход: {exit_cycle_state}" if exit_cycle_state else "",
+            ) if value
+        ) or "--"
+        recovery_context = str(metrics.get("recovery_context") or "").strip()
+        recovery_state = str(metrics.get("recovery_state") or "").strip()
+        recovery_status = "--"
+        if recovery_context or recovery_state:
+            recovery_status = " / ".join(value for value in (recovery_context, recovery_state) if value)
+        global_hedge_status = str(metrics.get("hedge_status") or "--")
+
+        entry_values = {
+            "spread.status.phase_value": self._format_activity_status(str(metrics.get("activity_status") or "--")),
+            "spread.status.block_value": self._format_block_reason_ru(block_reason),
+            "spread.status.cycle_value": cycle_status,
+            "spread.status.recovery_hedge_value": recovery_status,
+            "spread.status.global_hedge_value": global_hedge_status,
+            "spread.status.exec_connected_value": "--",
+            "spread.status.exec_auth_value": "--",
+            "spread.status.exec_reconnects_value": "--",
+            "spread.status.exec_last_error_value": "--",
+            "spread.status.left_order_value": str(metrics.get("left_order_status") or "--"),
+            "spread.status.left_position_value": "--",
+            "spread.status.left_notional_value": "--",
+            "spread.status.left_timing_value": "--",
+            "spread.status.right_order_value": str(metrics.get("right_order_status") or "--"),
+            "spread.status.right_position_value": "--",
+            "spread.status.right_notional_value": "--",
+            "spread.status.right_timing_value": "--",
+        }
+        return SpreadView(
+            spread_value_text=spread_value_text,
+            edge_tone=edge_tone,
+            entry_values=entry_values,
+        )
+
+    def _enrich_entry_status_values(self, state: dict[str, Any] | None, entry_values: dict[str, str]) -> dict[str, str]:
+        enriched = dict(entry_values)
+        raw_metrics = state.get("metrics") if isinstance(state, dict) else None
+        metrics = raw_metrics if isinstance(raw_metrics, dict) else {}
+
+        left_qty = self._fact_leg_qty(metrics, "left")
+        right_qty = self._fact_leg_qty(metrics, "right")
+        display_left_qty = left_qty
+        display_right_qty = right_qty
+        if left_qty is not None and right_qty is not None:
+            # Keep UI position fields synchronized by showing the exchange-confirmed
+            # hedged portion common to both legs.
+            hedged_common_qty = min(abs(left_qty), abs(right_qty))
+            display_left_qty = hedged_common_qty
+            display_right_qty = hedged_common_qty
+        left_ref_price = self._resolve_leg_reference_price("left", metrics)
+        right_ref_price = self._resolve_leg_reference_price("right", metrics)
+
+        left_notional = f"{self._format_ui_notional_usdt(left_ref_price, abs(display_left_qty))} USDT" if display_left_qty is not None else "--"
+        right_notional = f"{self._format_ui_notional_usdt(right_ref_price, abs(display_right_qty))} USDT" if display_right_qty is not None else "--"
+
+        left_ack = self._format_leg_latency(metrics.get("left_ack_latency_ms"))
+        left_fill = self._format_leg_latency(metrics.get("left_fill_latency_ms"))
+        right_ack = self._format_leg_latency(metrics.get("right_ack_latency_ms"))
+        right_fill = self._format_leg_latency(metrics.get("right_fill_latency_ms"))
+        execution_stream_health = metrics.get("execution_stream_health")
+        stream_snapshot = execution_stream_health if isinstance(execution_stream_health, dict) else {}
+
+        enriched["spread.status.left_position_value"] = self._format_ui_qty(abs(display_left_qty)) if display_left_qty is not None else "--"
+        enriched["spread.status.left_notional_value"] = left_notional
+        enriched["spread.status.left_timing_value"] = f"Ack {left_ack} | Fill {left_fill}"
+        enriched["spread.status.right_position_value"] = self._format_ui_qty(abs(display_right_qty)) if display_right_qty is not None else "--"
+        enriched["spread.status.right_notional_value"] = right_notional
+        enriched["spread.status.right_timing_value"] = f"Ack {right_ack} | Fill {right_fill}"
+        enriched["spread.status.exec_connected_value"] = self._format_stream_health_connected(stream_snapshot)
+        enriched["spread.status.exec_auth_value"] = self._format_stream_health_authenticated(stream_snapshot)
+        enriched["spread.status.exec_reconnects_value"] = self._format_stream_health_reconnects(stream_snapshot)
+        enriched["spread.status.exec_last_error_value"] = self._format_stream_health_last_error(stream_snapshot)
+        return enriched
+
+    def _fact_leg_qty(self, metrics: dict[str, Any], leg_name: str) -> Decimal | None:
+        # Show only exchange-confirmed position size to avoid confusing
+        # transient jumps from local estimated remainder fields.
+        actual = self._decimal_or_none(metrics.get(f"{leg_name}_actual_position_qty"))
+        return actual if actual is not None else None
+
+    def _resolve_leg_reference_price(self, leg_name: str, metrics: dict[str, Any]) -> Decimal | None:
+        quote = self._latest_public_quotes.get(leg_name)
+        bid = self._decimal_or_none((quote or {}).get("bid"))
+        ask = self._decimal_or_none((quote or {}).get("ask"))
+        if bid is None:
+            bid = self._decimal_or_none(metrics.get(f"{leg_name}_bid"))
+        if ask is None:
+            ask = self._decimal_or_none(metrics.get(f"{leg_name}_ask"))
+        if bid is not None and ask is not None and bid > Decimal("0") and ask > Decimal("0"):
+            return (bid + ask) / Decimal("2")
+        if ask is not None and ask > Decimal("0"):
+            return ask
+        if bid is not None and bid > Decimal("0"):
+            return bid
+        return None
+
+    @staticmethod
+    def _format_leg_latency(value: object) -> str:
+        try:
+            latency = int(value)
+        except (TypeError, ValueError):
+            return "--"
+        if latency < 0:
+            return "--"
+        return f"{latency}ms"
+
     @staticmethod
     def _decimal_or_none(value: object) -> Decimal | None:
         if value in (None, "", "-"):
@@ -1123,10 +1752,106 @@ class SpreadMockTab(QWidget):
             return None
 
     @staticmethod
+    def _safe_edge(numerator_left: Decimal | None, denominator_right: Decimal | None) -> Decimal | None:
+        if numerator_left is None or denominator_right is None or denominator_right <= Decimal("0"):
+            return None
+        return (numerator_left - denominator_right) / denominator_right
+
+    @staticmethod
     def _format_spread_percent(value: Decimal | None) -> str:
         if value is None:
             return "--"
         return f"{(value * Decimal('100')):.2f}%"
+
+    @staticmethod
+    def _format_stream_health_connected(snapshot: dict[str, Any]) -> str:
+        streams = snapshot.get("streams") if isinstance(snapshot.get("streams"), dict) else {}
+        if not streams:
+            return "--"
+        parts = [f"{leg}:{'Y' if bool(item.get('connected')) else 'N'}" for leg, item in streams.items() if isinstance(item, dict)]
+        return " ".join(parts) if parts else "--"
+
+    @staticmethod
+    def _format_stream_health_authenticated(snapshot: dict[str, Any]) -> str:
+        streams = snapshot.get("streams") if isinstance(snapshot.get("streams"), dict) else {}
+        if not streams:
+            return "--"
+        parts: list[str] = []
+        for leg, item in streams.items():
+            if not isinstance(item, dict):
+                continue
+            value = item.get("authenticated")
+            if value is None:
+                parts.append(f"{leg}:-")
+            else:
+                parts.append(f"{leg}:{'Y' if bool(value) else 'N'}")
+        return " ".join(parts) if parts else "--"
+
+    @staticmethod
+    def _format_stream_health_reconnects(snapshot: dict[str, Any]) -> str:
+        streams = snapshot.get("streams") if isinstance(snapshot.get("streams"), dict) else {}
+        if not streams:
+            return "--"
+        parts = [f"{leg}:{int(item.get('reconnect_attempts_total') or 0)}" for leg, item in streams.items() if isinstance(item, dict)]
+        return " ".join(parts) if parts else "--"
+
+    @staticmethod
+    def _format_stream_health_last_error(snapshot: dict[str, Any]) -> str:
+        streams = snapshot.get("streams") if isinstance(snapshot.get("streams"), dict) else {}
+        if not streams:
+            return "--"
+        errors: list[str] = []
+        for leg, item in streams.items():
+            if not isinstance(item, dict):
+                continue
+            message = str(item.get("last_error") or "").strip()
+            if message:
+                errors.append(f"{leg}:{message}")
+        return " | ".join(errors) if errors else "--"
+
+    @staticmethod
+    def _format_activity_status(value: str) -> str:
+        mapping = {
+            "STOPPED": tr("spread.activity.stopped"),
+            "WAITING_ENTRY": tr("spread.activity.waiting_entry"),
+            "ENTERING": tr("spread.activity.entering"),
+            "WAITING_EXIT": tr("spread.activity.waiting_exit"),
+            "EXITING": tr("spread.activity.exiting"),
+            "REBALANCING": tr("spread.activity.rebalancing"),
+            "RESTORE_HEDGE": tr("spread.activity.restore_hedge"),
+            "EMERGENCY_CLOSE": tr("spread.activity.emergency_close"),
+            "RECOVERY": tr("spread.activity.recovery"),
+            "FAILED": tr("spread.activity.failed"),
+        }
+        return mapping.get(str(value or "").strip().upper(), str(value or "--"))
+
+    @staticmethod
+    def _format_block_reason_ru(reason: str | None) -> str:
+        normalized = str(reason or "").strip().upper()
+        if not normalized:
+            return "Нет"
+        mapping = {
+            "SIMULATED_ENTRY_WINDOW_CLOSED": "Нет",
+            "SIMULATED_EXIT_WINDOW_CLOSED": "Нет",
+            "POSITION_DIRECTION_MISMATCH": "Направление сигнала не совпадает с текущей позицией",
+            "EXIT_PRIORITY_ACTIVE": "Выход в приоритете, вход временно заблокирован",
+            "ENTRY_COOLDOWN": "Пауза после входа (cooldown)",
+            "ENTRY_CYCLE_ACTIVE": "Активен цикл исполнения",
+            "ENTRY_RECOVERY_ACTIVE": "Активно восстановление входа",
+            "EXIT_RECOVERY_ACTIVE": "Активно восстановление выхода",
+            "HEDGE_PROTECTION_ACTIVE": "Активна защита хеджа",
+            "ENTRY_WAIT_ORDER_SETTLE": "Ожидание подтверждения ордеров",
+            "RUNTIME_RECONCILING": "Идёт синхронизация состояния",
+            "WAITING_QUOTES": "Ожидание котировок",
+            "BELOW_ENTRY_THRESHOLD": "Эдж ниже порога входа",
+            "INVALID_ENTRY_THRESHOLD": "Некорректный порог входа",
+            "POSITION_CAP_REACHED": "Достигнут лимит позиции",
+            "MARGIN_LIMIT_REACHED": "Достигнут лимит по марже",
+            "STALE_QUOTES": "Котировки устарели",
+            "QUOTE_SKEW_TOO_HIGH": "Слишком большой рассинхрон котировок",
+            "INSUFFICIENT_LIQUIDITY": "Недостаточно ликвидности в стакане",
+        }
+        return mapping.get(normalized, normalized)
 
     def retranslate_ui(self) -> None:
         for slot_name, button in self._exchange_buttons.items():
@@ -1143,10 +1868,28 @@ class SpreadMockTab(QWidget):
             self._clear_quotes(slot_name)
         if self._select_button is not None:
             self._select_button.setText(tr("spread.select"))
+        if self._start_button is not None:
+            self._start_button.setText(tr("spread.start"))
+        if self._stop_button is not None:
+            self._stop_button.setText(tr("spread.stop"))
+        self._update_signal_mode_button_text()
+        if self._simulate_entry_button is not None:
+            self._simulate_entry_button.setText(tr("spread.simulate_entry"))
+        if self._simulate_exit_button is not None:
+            self._simulate_exit_button.setText(tr("spread.simulate_exit"))
         if self._strategy_title_label is not None:
             self._strategy_title_label.setText(tr("spread.strategy_params"))
         for label in self._strategy_field_labels:
             label.setText(tr(str(label.property("i18n_key"))))
+        self._update_runtime_controls()
+
+    def _update_signal_mode_button_text(self) -> None:
+        if self._signal_mode_button is None:
+            return
+        if self._strategy_signal_mode == "simulated":
+            self._signal_mode_button.setText(tr("spread.signal_mode_simulated"))
+        else:
+            self._signal_mode_button.setText(tr("spread.signal_mode_market"))
 
     def apply_theme(self) -> None:
         c_surface = theme_color("surface")
@@ -1353,6 +2096,44 @@ class SpreadMockTab(QWidget):
                 background-color: {self._rgba(c_surface, 0.90)};
                 border: 1px solid {self._rgba(c_accent, 0.82)};
             }}
+            QPushButton#spreadModeButton {{
+                background-color: {self._rgba(c_alt, 0.94)};
+                color: {c_primary};
+                border: 1px solid {self._rgba(c_border, 0.72)};
+                border-radius: 10px;
+                font-size: 11px;
+                font-weight: 800;
+                padding: 4px 10px;
+            }}
+            QPushButton#spreadModeButton:hover {{
+                background-color: {self._rgba(c_surface, 0.98)};
+                border: 1px solid {self._rgba(c_accent, 0.76)};
+            }}
+            QPushButton#spreadModeButton:checked {{
+                background-color: {self._rgba(c_success, 0.18)};
+                border: 1px solid {self._rgba(c_success, 0.84)};
+            }}
+            QPushButton#spreadSimulationButton {{
+                background-color: {self._rgba(c_alt, 0.92)};
+                color: {c_primary};
+                border: 1px solid {self._rgba(c_accent, 0.54)};
+                border-radius: 10px;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 4px 10px;
+            }}
+            QPushButton#spreadSimulationButton:hover {{
+                background-color: {self._rgba(c_surface, 0.98)};
+                border: 1px solid {self._rgba(c_accent, 0.78)};
+            }}
+            QPushButton#spreadSimulationButton:pressed {{
+                background-color: {self._rgba(c_surface, 0.90)};
+                border: 1px solid {self._rgba(c_accent, 0.88)};
+            }}
+            QPushButton#spreadSimulationButton:checked {{
+                background-color: {self._rgba(c_success, 0.18)};
+                border: 1px solid {self._rgba(c_success, 0.82)};
+            }}
             QLabel#spreadValueLabel {{
                 color: {c_primary};
                 background-color: transparent;
@@ -1429,6 +2210,16 @@ class SpreadMockTab(QWidget):
                 background-color: {self._rgba(c_alt, 0.94)};
                 border: 1px solid {self._rgba(c_accent, 0.88)};
             }}
+            QScrollArea#runtimesScroll {{
+                background: transparent;
+                border: none;
+            }}
+            QScrollArea#runtimesScroll > QWidget > QWidget {{
+                background: transparent;
+            }}
             """
         )
-
+        for card in self._runtime_cards.values():
+            card.apply_theme()
+        if self._diagnostics_window is not None:
+            self._diagnostics_window.apply_theme()

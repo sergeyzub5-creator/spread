@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import threading
 import time
 from collections.abc import Callable
@@ -22,6 +23,8 @@ class BinanceUsdmUserDataStream:
     BASE_URL = "https://fapi.binance.com"
     WS_BASE_URL = "wss://fstream.binance.com/ws"
     LISTEN_KEY_PATH = "/fapi/v1/listenKey"
+    CLOSE_JOIN_TIMEOUT_SECONDS = 2.0
+    RECONNECT_BACKOFF_MAX_SECONDS = 15.0
 
     def __init__(
         self,
@@ -43,27 +46,44 @@ class BinanceUsdmUserDataStream:
         self._connected = False
         self._closing = False
         self._opened_event = threading.Event()
+        self._keepalive_stop_event = threading.Event()
         self._connect_error: Exception | None = None
+        self._session_ready = False
+        self._reconnect_attempts_total = 0
+        self._last_disconnect_code: str | None = None
+        self._last_disconnect_message: str | None = None
+        self._last_error_text: str | None = None
 
     def connect(self) -> None:
         if websocket is None:
             raise RuntimeError("websocket-client is required for BinanceUsdmUserDataStream")
 
+        should_start_thread = False
         with self._lock:
             if self._thread is not None and self._thread.is_alive() and self._connected:
                 self._logger.info("binance user data stream reuse existing connection | listen_key=%s", self._listen_key)
                 return
-            self._closing = False
-            self._connected = False
-            self._connect_error = None
-            self._opened_event.clear()
-            self._listen_key = self._listen_key or self._create_listen_key()
-            self._thread = threading.Thread(target=self._run_forever, name="binance-usdm-user-stream", daemon=True)
-            self._thread.start()
-            self._logger.info("binance user data stream starting new connection | listen_key=%s", self._listen_key)
+            if self._thread is not None and self._thread.is_alive():
+                self._connect_error = None
+                self._opened_event.clear()
+                self._logger.info("binance user data stream waiting for active reconnect attempt")
+            else:
+                self._closing = False
+                self._connected = False
+                self._connect_error = None
+                self._opened_event.clear()
+                self._keepalive_stop_event.clear()
+                self._listen_key = self._listen_key or self._create_listen_key()
+                self._thread = threading.Thread(target=self._run_forever, name="binance-usdm-user-stream", daemon=True)
+                should_start_thread = True
             if self._keepalive_thread is None or not self._keepalive_thread.is_alive():
                 self._keepalive_thread = threading.Thread(target=self._keepalive_loop, name="binance-usdm-user-keepalive", daemon=True)
                 self._keepalive_thread.start()
+        if should_start_thread:
+            thread = self._thread
+            if thread is not None:
+                thread.start()
+            self._logger.info("binance user data stream starting new connection | listen_key=%s", self._listen_key)
 
         if not self._opened_event.wait(timeout=self._timeout_seconds):
             raise RuntimeError("binance user data stream connect timeout")
@@ -80,40 +100,92 @@ class BinanceUsdmUserDataStream:
             self._closing = True
             ws_app = self._ws_app
             listen_key = self._listen_key
+            thread = self._thread
+            keepalive_thread = self._keepalive_thread
+        self._keepalive_stop_event.set()
         if ws_app is not None:
-            ws_app.close()
+            try:
+                ws_app.close()
+            except Exception as exc:
+                self._logger.warning("binance user stream close request failed: %s", exc)
+        if (
+            thread is not None
+            and thread.is_alive()
+            and thread is not threading.current_thread()
+        ):
+            thread.join(timeout=self.CLOSE_JOIN_TIMEOUT_SECONDS)
+            if thread.is_alive():
+                self._logger.warning(
+                    "binance user stream thread did not stop within timeout | timeout_seconds=%s",
+                    self.CLOSE_JOIN_TIMEOUT_SECONDS,
+                )
+        if (
+            keepalive_thread is not None
+            and keepalive_thread.is_alive()
+            and keepalive_thread is not threading.current_thread()
+        ):
+            keepalive_thread.join(timeout=self.CLOSE_JOIN_TIMEOUT_SECONDS)
+            if keepalive_thread.is_alive():
+                self._logger.warning(
+                    "binance user stream keepalive thread did not stop within timeout | timeout_seconds=%s",
+                    self.CLOSE_JOIN_TIMEOUT_SECONDS,
+                )
         if listen_key:
             try:
                 self._delete_listen_key(listen_key)
             except Exception as exc:
                 self._logger.warning("binance user stream delete listenKey failed: %s", exc)
+        with self._lock:
+            self._connected = False
+            self._listen_key = None
+            self._ws_app = None
+            self._thread = None
+            self._keepalive_thread = None
+            self._opened_event.set()
 
     def _run_forever(self) -> None:
-        with self._lock:
-            listen_key = self._listen_key
-        if not listen_key:
-            self._connect_error = RuntimeError("missing Binance listenKey")
-            self._opened_event.set()
-            return
+        backoff_seconds = 1.0
+        while not self._closing:
+            with self._lock:
+                listen_key = self._listen_key
+                self._session_ready = False
+            if not listen_key:
+                self._connect_error = RuntimeError("missing Binance listenKey")
+                self._opened_event.set()
+                break
 
-        self._ws_app = websocket.WebSocketApp(
-            f"{self.WS_BASE_URL}/{listen_key}",
-            on_open=lambda ws: self._on_open(),
-            on_message=lambda ws, message: self._on_message(message),
-            on_error=lambda ws, error: self._on_error(error),
-            on_close=lambda ws, status_code, message: self._on_close(status_code, message),
-        )
-        try:
-            self._ws_app.run_forever()
-        except Exception as exc:  # pragma: no cover
-            self._connect_error = exc
-            self._opened_event.set()
-            self._logger.error("binance user stream loop crashed: %s", exc)
+            with self._lock:
+                self._ws_app = websocket.WebSocketApp(
+                    f"{self.WS_BASE_URL}/{listen_key}",
+                    on_open=lambda ws: self._on_open(),
+                    on_message=lambda ws, message: self._on_message(message),
+                    on_error=lambda ws, error: self._on_error(error),
+                    on_close=lambda ws, status_code, message: self._on_close(status_code, message),
+                )
+            try:
+                self._ws_app.run_forever()
+            except Exception as exc:  # pragma: no cover
+                self._connect_error = exc
+                self._opened_event.set()
+                self._logger.error("binance user stream loop crashed: %s", exc)
+            finally:
+                with self._lock:
+                    self._ws_app = None
+            if self._closing:
+                break
+            delay = min(backoff_seconds, self.RECONNECT_BACKOFF_MAX_SECONDS)
+            jitter = random.uniform(0.0, delay * 0.3)
+            self._reconnect_attempts_total += 1
+            self._logger.warning("binance user stream reconnect scheduled | delay_seconds=%.2f", delay + jitter)
+            time.sleep(delay + jitter)
+            if self._session_ready:
+                backoff_seconds = 1.0
+            else:
+                backoff_seconds = min(backoff_seconds * 2.0, self.RECONNECT_BACKOFF_MAX_SECONDS)
 
     def _keepalive_loop(self) -> None:
         while not self._closing:
-            time.sleep(self._keepalive_interval_seconds)
-            if self._closing:
+            if self._keepalive_stop_event.wait(self._keepalive_interval_seconds):
                 break
             with self._lock:
                 listen_key = self._listen_key
@@ -124,9 +196,21 @@ class BinanceUsdmUserDataStream:
                 self._logger.info("binance user stream listenKey refreshed")
             except Exception as exc:
                 self._logger.warning("binance user stream keepalive failed: %s", exc)
+                if self._closing:
+                    continue
+                if "http 4" in str(exc):
+                    try:
+                        new_key = self._create_listen_key()
+                    except Exception as rotate_exc:
+                        self._logger.warning("binance user stream listenKey rotate failed: %s", rotate_exc)
+                    else:
+                        with self._lock:
+                            self._listen_key = new_key
+                        self._logger.warning("binance user stream listenKey rotated after keepalive failure")
 
     def _on_open(self) -> None:
         self._connected = True
+        self._session_ready = True
         self._connect_error = None
         self._opened_event.set()
         self._logger.info("binance user data stream connected")
@@ -138,7 +222,7 @@ class BinanceUsdmUserDataStream:
         event = self._normalize_event(payload)
         if event is None:
             return
-        self._logger.info(
+        self._logger.debug(
             "binance user data event received | event_type=%s | event_time=%s | transaction_time=%s | symbol=%s | order_id=%s | status=%s | exec_type=%s",
             event.event_type,
             event.event_time,
@@ -153,14 +237,31 @@ class BinanceUsdmUserDataStream:
 
     def _on_error(self, error: Any) -> None:
         self._logger.error("binance user data stream error: %s", error)
+        self._last_error_text = str(error)
         if not self._connected and self._connect_error is None:
             self._connect_error = error if isinstance(error, Exception) else RuntimeError(str(error))
             self._opened_event.set()
 
     def _on_close(self, status_code: Any, message: Any) -> None:
-        self._connected = False
+        with self._lock:
+            self._connected = False
+            self._ws_app = None
+            self._last_disconnect_code = None if status_code is None else str(status_code)
+            self._last_disconnect_message = None if message is None else str(message)
         self._opened_event.set()
         self._logger.info("binance user data stream closed | code=%s | message=%s", status_code, message)
+
+    def diagnostics(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "connected": self._connected,
+                "closing": self._closing,
+                "listen_key_present": bool(self._listen_key),
+                "reconnect_attempts_total": self._reconnect_attempts_total,
+                "last_disconnect_code": self._last_disconnect_code,
+                "last_disconnect_message": self._last_disconnect_message,
+                "last_error_text": self._last_error_text,
+            }
 
     def _normalize_event(self, payload: dict[str, Any]) -> ExecutionStreamEvent | None:
         event_name = str(payload.get("e", "")).strip()

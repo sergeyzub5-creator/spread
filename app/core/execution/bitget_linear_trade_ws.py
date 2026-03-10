@@ -60,6 +60,9 @@ class BitgetLinearTradeWebSocketTransport:
         self._opened_event = threading.Event()
         self._auth_event = threading.Event()
         self._connect_error: Exception | None = None
+        self._last_ping_ts_ms = 0
+        self._last_pong_ts_ms = 0
+        self._ping_fail_count = 0
 
     def connect(self) -> bool:
         if websocket is None:
@@ -208,8 +211,10 @@ class BitgetLinearTradeWebSocketTransport:
             if self._closing:
                 return
             try:
+                self._last_ping_ts_ms = int(time.time() * 1000)
                 self._send_raw("ping")
             except Exception:
+                self._ping_fail_count += 1
                 return
 
     def _on_open(self) -> None:
@@ -220,6 +225,7 @@ class BitgetLinearTradeWebSocketTransport:
 
     def _on_message(self, message: str) -> None:
         if str(message).strip().lower() == "pong":
+            self._last_pong_ts_ms = int(time.time() * 1000)
             return
         payload = json.loads(message)
         if not isinstance(payload, dict):
@@ -347,6 +353,18 @@ class BitgetLinearTradeWebSocketTransport:
         if ws_app is None:
             raise BitgetTradeWebSocketError("bitget trade ws is not connected")
         ws_app.send(payload)
+
+    def diagnostics(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "connected": self._connected,
+                "authenticated": self._authenticated,
+                "closing": self._closing,
+                "pending_requests": len(self._pending),
+                "last_ping_ts_ms": self._last_ping_ts_ms or None,
+                "last_pong_ts_ms": self._last_pong_ts_ms or None,
+                "ping_fail_count": self._ping_fail_count,
+            }
 
     def _fail_all_pending(self, error: Exception) -> None:
         with self._lock:

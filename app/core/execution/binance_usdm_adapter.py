@@ -84,6 +84,13 @@ class BinanceUsdmExecutionAdapter(ExecutionAdapter):
         self._user_data_stream.close()
         self._logger.info("binance execution adapter closed")
 
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "route": self.ROUTE_NAME,
+            "transport": self._transport.diagnostics(),
+            "user_stream": self._user_data_stream.diagnostics(),
+        }
+
     def _build_place_order_params(self, request: ExecutionOrderRequest) -> dict[str, Any]:
         params: dict[str, Any] = {
             "symbol": request.instrument_id.symbol,

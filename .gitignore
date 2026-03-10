@@ -10,3 +10,6 @@ __pycache__/
 *.log
 data/ui_state.json
 data/exchanges.json
+app/data/ui_state.json
+app/data/exchanges.json
+app/data/credentials.secure.json

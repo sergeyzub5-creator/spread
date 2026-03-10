@@ -1,11 +1,13 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import os
 import threading
 
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMainWindow, QMenu, QSizePolicy, QTabWidget, QToolButton, QVBoxLayout, QWidget
 
+from app.core.logging.logger_factory import get_logger
 from app.ui.i18n import get_language_manager, tr
 from app.ui.tabs.exchanges_mock_tab import ExchangesMockTab
 from app.ui.tabs.spread_mock_tab import SpreadMockTab
@@ -20,13 +22,17 @@ class AppWindow(QMainWindow):
 
     def __init__(self, coordinator=None) -> None:
         super().__init__()
+        self._logger = get_logger("ui.window")
         self.coordinator = coordinator
         self.language_manager = get_language_manager()
         self.language_manager.language_changed.connect(self._retranslate_ui)
         self.theme_manager = get_theme_manager()
         self.theme_manager.theme_changed.connect(self._apply_theme)
         self._shutdown_splash: ShutdownSplash | None = None
+        self._shutdown_watchdog: QTimer | None = None
+        self._hard_exit_watchdog: QTimer | None = None
         self._closing = False
+        self._shutdown_finalized = False
         self.shutdown_finished.connect(self._finalize_shutdown)
 
         self.setWindowTitle(tr("app.window_title"))
@@ -105,6 +111,13 @@ class AppWindow(QMainWindow):
         self.settings_btn.setMinimumWidth(130)
         self.settings_btn.setFixedHeight(24)
         self.top_controls.addWidget(self.settings_btn, 0, Qt.AlignmentFlag.AlignRight)
+
+        self.diagnostics_btn = QToolButton()
+        self.diagnostics_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.diagnostics_btn.setMinimumWidth(140)
+        self.diagnostics_btn.setFixedHeight(24)
+        self.diagnostics_btn.clicked.connect(self._open_diagnostics_window)
+        self.top_controls.addWidget(self.diagnostics_btn, 0, Qt.AlignmentFlag.AlignRight)
 
         top_row.addWidget(self.right_slot, 1)
         parent_layout.addLayout(top_row)
@@ -225,9 +238,24 @@ class AppWindow(QMainWindow):
             }}
             """
         )
+        self.diagnostics_btn.setStyleSheet(
+            f"""
+            QToolButton {{
+                background-color: {theme_color('surface')};
+                color: {theme_color('text_primary')};
+                border: 1px solid {theme_color('border')};
+                border-radius: 8px;
+                padding: 1px 12px;
+            }}
+            QToolButton:hover {{
+                background-color: {theme_color('surface_alt')};
+            }}
+            """
+        )
         self.language_btn.setFont(self._build_top_font(weight=QFont.Weight.DemiBold))
         self.language_code_label.setFont(self._build_top_font(weight=QFont.Weight.Bold))
         self.settings_btn.setFont(self._build_top_font(weight=QFont.Weight.DemiBold))
+        self.diagnostics_btn.setFont(self._build_top_font(weight=QFont.Weight.DemiBold))
 
         self._retranslate_ui()
         self._sync_header_side_widths()
@@ -247,6 +275,7 @@ class AppWindow(QMainWindow):
         self.language_code_label.setText(self.language_manager.language().upper())
         self.language_btn.setToolTip(tr("top.language_tooltip"))
         self.settings_btn.setText(tr("top.settings"))
+        self.diagnostics_btn.setText(tr("spread.diagnostics"))
         self.tabs.setTabText(0, tr("tab.exchanges"))
         self.tabs.setTabText(1, tr("tab.spread"))
         self._build_language_menu()
@@ -273,21 +302,56 @@ class AppWindow(QMainWindow):
         self._closing = True
         event.ignore()
         self.hide()
+        self._shutdown_finalized = False
 
         if self._shutdown_splash is None:
             self._shutdown_splash = ShutdownSplash()
         self._shutdown_splash.start()
         self.status_bar.stop_background_tasks()
+        self._ensure_shutdown_watchdog()
 
         def _shutdown() -> None:
-            if self.coordinator is not None:
-                self.coordinator.shutdown()
-            self.shutdown_finished.emit()
+            try:
+                if self.coordinator is not None:
+                    self.coordinator.shutdown()
+            finally:
+                self.shutdown_finished.emit()
 
         threading.Thread(target=_shutdown, name="app-shutdown", daemon=True).start()
 
+    def _ensure_shutdown_watchdog(self) -> None:
+        if self._shutdown_watchdog is None:
+            self._shutdown_watchdog = QTimer(self)
+            self._shutdown_watchdog.setSingleShot(True)
+            self._shutdown_watchdog.timeout.connect(self._force_finalize_shutdown)
+        # Never keep splash forever: force close flow if backend shutdown hangs.
+        self._shutdown_watchdog.start(7000)
+        if self._hard_exit_watchdog is None:
+            self._hard_exit_watchdog = QTimer(self)
+            self._hard_exit_watchdog.setSingleShot(True)
+            self._hard_exit_watchdog.timeout.connect(self._force_hard_exit)
+        # Extra process-level safety for non-daemon threads or stuck native loops.
+        self._hard_exit_watchdog.start(10000)
+
+    def _force_finalize_shutdown(self) -> None:
+        self._logger.warning("shutdown watchdog fired | action=force_finalize")
+        self._finalize_shutdown()
+
+    def _force_hard_exit(self) -> None:
+        self._logger.error("hard-exit watchdog fired | action=os._exit(0)")
+        os._exit(0)
+
     def _finalize_shutdown(self) -> None:
+        if self._shutdown_finalized:
+            return
+        self._shutdown_finalized = True
+        if self._shutdown_watchdog is not None:
+            self._shutdown_watchdog.stop()
         if self._shutdown_splash is not None:
             self._shutdown_splash.finish()
         QTimer.singleShot(430, QApplication.instance().quit)
+
+    def _open_diagnostics_window(self) -> None:
+        if hasattr(self, "spread_tab") and self.spread_tab is not None:
+            self.spread_tab._open_diagnostics_window()
 

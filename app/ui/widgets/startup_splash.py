@@ -2,7 +2,7 @@
 
 from math import cos, pi
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, QSequentialAnimationGroup, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
@@ -53,6 +53,7 @@ class StartupSplash(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setFixedSize(520, 300)
         self.setWindowOpacity(0.0)
+        self._finishing = False
 
         self._build_ui(tr("splash.title"), tr("splash.loading"))
         self._build_animations()
@@ -125,12 +126,7 @@ class StartupSplash(QWidget):
         self._fade_out.setStartValue(1.0)
         self._fade_out.setEndValue(0.0)
         self._fade_out.setEasingCurve(QEasingCurve.Type.InCubic)
-
-        self._sequence = QSequentialAnimationGroup(self)
-        self._sequence.addAnimation(self._fade_in)
-        self._sequence.addPause(950)
-        self._sequence.addAnimation(self._fade_out)
-        self._sequence.finished.connect(self._on_done)
+        self._fade_out.finished.connect(self._on_done)
 
     def _on_pulse(self, value) -> None:
         t = float(value)
@@ -146,10 +142,18 @@ class StartupSplash(QWidget):
 
     def start(self) -> None:
         self._center_on_screen()
+        self.setWindowOpacity(1.0)
         self.show()
         self.raise_()
         self._pulse_anim.start()
-        self._sequence.start()
+
+    def finish(self) -> None:
+        if self._finishing:
+            return
+        self._finishing = True
+        self._pulse_anim.stop()
+        self.close()
+        self.finished.emit()
 
     def _on_done(self) -> None:
         self._pulse_anim.stop()

@@ -128,6 +128,15 @@ class BitgetLinearRestExecutionAdapter(ExecutionAdapter):
     def close(self) -> None:
         self._logger.info("bitget rest execution adapter closed")
 
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "route": self.ROUTE_NAME,
+            "transport": {
+                "connected": True,
+                "mode": "rest",
+            },
+        }
+
     def _build_place_order_body(self, request: ExecutionOrderRequest) -> dict[str, Any]:
         order_type = str(request.order_type).strip().lower()
         body: dict[str, Any] = {
