@@ -827,6 +827,7 @@ class SpreadMockTab(QWidget):
         if self.coordinator is not None:
             self.coordinator.prefetch_exchange_instruments(exchange)
         self._save_state()
+        self._sync_spread_view_with_slots()
         self._emit(f"spread:exchange:{slot_name}:{exchange}")
 
     def _set_market_type(self, slot_name: str, market_type: str, title: str) -> None:
@@ -844,6 +845,7 @@ class SpreadMockTab(QWidget):
         if self.coordinator is not None and exchange:
             self.coordinator.prefetch_market_type(exchange, market_type)
         self._save_state()
+        self._sync_spread_view_with_slots()
         self._emit(f"spread:market_type:{slot_name}:{market_type}")
 
     def _set_symbol(self, slot_name: str, symbol: str, title: str) -> None:
@@ -856,6 +858,7 @@ class SpreadMockTab(QWidget):
         self._update_pair_clear_action(slot_name)
         self._clear_quotes(slot_name)
         self._save_state()
+        self._sync_spread_view_with_slots()
         self._emit(f"spread:instrument:{slot_name}:{symbol}")
 
     def _clear_symbol(self, slot_name: str) -> None:
@@ -872,6 +875,7 @@ class SpreadMockTab(QWidget):
         self._update_pair_clear_action(slot_name)
         self._clear_quotes(slot_name)
         self._save_state()
+        self._sync_spread_view_with_slots()
         self._emit(f"spread:instrument_cleared:{slot_name}")
         self._update_pair_suggestions(slot_name, "", force_popup=True)
 
@@ -950,7 +954,11 @@ class SpreadMockTab(QWidget):
                 "bid": bid_decimal,
                 "ask": ask_decimal,
             }
+        # Центр: без рантайма — всегда публичный спред; с рантаймом — только если
+        # выбранная пара совпадает с активным воркером (иначе показываем новый выбор).
         if not self._runtime_running and self._pending_spread_state is None:
+            self._render_public_quote_spread_view()
+        elif self._runtime_running and not self._slots_match_active_runtime():
             self._render_public_quote_spread_view()
 
     def _build_ui(self) -> None:
@@ -1104,6 +1112,56 @@ class SpreadMockTab(QWidget):
     def _make_worker_id(left_exchange: str, left_symbol: str, right_exchange: str, right_symbol: str) -> str:
         return f"spread_{left_exchange}_{left_symbol}__{right_exchange}_{right_symbol}".lower()
 
+    @staticmethod
+    def _spread_threshold_percent_to_ratio(text: str) -> str:
+        """Проценты из полей стратегии → доля для сравнения с calculate_spread_edges."""
+        raw = str(text or "").strip().replace(",", ".")
+        if not raw:
+            return "0"
+        try:
+            pct = Decimal(raw)
+        except Exception:
+            return raw
+        if pct == 0:
+            return "0"
+        # Отрицательный % → отрицательная доля (граница порога выхода на оси со знаком).
+        ratio = (pct / Decimal("100")).normalize()
+        # Убираем лишние нули, но не экспоненту
+        return format(ratio, "f").rstrip("0").rstrip(".") or "0"
+
+    def _current_slots_worker_id(self) -> str | None:
+        """worker_id для текущего выбора в слотах; None если пара не собрана."""
+        left = self._slot_state["left"]
+        right = self._slot_state["right"]
+        if not all((left.get("exchange"), left.get("market_type"), left.get("symbol"), right.get("exchange"), right.get("market_type"), right.get("symbol"))):
+            return None
+        return self._make_worker_id(
+            str(left["exchange"]), str(left["symbol"]),
+            str(right["exchange"]), str(right["symbol"]),
+        )
+
+    def _slots_match_active_runtime(self) -> bool:
+        """True если центр должен показывать метрики активного рантайма (та же пара)."""
+        if not self._runtime_running or not self._active_worker_id:
+            return False
+        slots_id = self._current_slots_worker_id()
+        return slots_id is not None and slots_id == self._active_worker_id
+
+    def _sync_spread_view_with_slots(self) -> None:
+        """
+        После смены биржи/пары: если рантайм на другой паре — центр показывает спред
+        по текущим слотам (публичные котировки), а не залипший спред старого воркера.
+        """
+        if self._slots_match_active_runtime():
+            return
+        self._pending_spread_state = None
+        if self._ui_spread_timer.isActive():
+            self._ui_spread_timer.stop()
+        if self._latest_public_quotes.get("left") and self._latest_public_quotes.get("right"):
+            self._render_public_quote_spread_view()
+        else:
+            self._set_spread_label_idle()
+
     def _start_spread_runtime(self) -> None:
         if self.coordinator is None:
             return
@@ -1125,9 +1183,14 @@ class SpreadMockTab(QWidget):
         right_credentials = self._find_connected_exchange_credentials(str(right["exchange"]))
         strategy_params = self._current_strategy_params()
 
+        # Поля «Вход %» / «Выход %» вводятся в процентах (как на центральном лейбле спреда).
+        # В рантайме сравнение идёт с abs(edge), где edge — доля (0.002 = 0.20%).
+        # Без деления на 100 порог 0.20 никогда не достигается при типичных спредах.
+        entry_threshold_ui = str(strategy_params.get("spread.entry_threshold") or "0")
+        exit_threshold_ui = str(strategy_params.get("spread.exit_threshold") or "0")
         card_params = {
-            "entry_threshold": str(strategy_params.get("spread.entry_threshold") or "0"),
-            "exit_threshold": str(strategy_params.get("spread.exit_threshold") or "0"),
+            "entry_threshold": self._spread_threshold_percent_to_ratio(entry_threshold_ui),
+            "exit_threshold": self._spread_threshold_percent_to_ratio(exit_threshold_ui),
             "entry_notional_usdt": str(strategy_params.get("spread.target_size") or "0"),
             "entry_min_step_pct": str(strategy_params.get("spread.entry_min_step_pct") or "20"),
             "strategy_signal_mode": self._strategy_signal_mode,
@@ -1177,13 +1240,19 @@ class SpreadMockTab(QWidget):
             )
 
         self._active_worker_id = worker_id
+        # На карточке показываем те же числа, что в полях (%); в рантайм ушли доли.
+        card_display_params = {
+            **card_params,
+            "entry_threshold": entry_threshold_ui,
+            "exit_threshold": exit_threshold_ui,
+        }
         self._add_runtime_card(
             worker_id,
             left_exchange=str(left["exchange"]),
             left_symbol=str(left["symbol"]),
             right_exchange=str(right["exchange"]),
             right_symbol=str(right["symbol"]),
-            params=card_params,
+            params=card_display_params,
         )
 
     def _add_runtime_card(
@@ -1280,6 +1349,13 @@ class SpreadMockTab(QWidget):
         self._simulated_entry_window_open = bool(metrics.get("simulated_entry_window_open"))
         self._simulated_exit_window_open = bool(metrics.get("simulated_exit_window_open"))
         self._update_runtime_controls()
+        # Пара в слотах сменилась — центр не привязываем к рантайму; карточка обновляется выше
+        if not self._slots_match_active_runtime():
+            self._pending_spread_state = None
+            if self._ui_spread_timer.isActive():
+                self._ui_spread_timer.stop()
+            self._sync_spread_view_with_slots()
+            return
         self._pending_spread_state = state
         if not self._ui_spread_timer.isActive():
             self._ui_spread_timer.start()
@@ -1297,6 +1373,12 @@ class SpreadMockTab(QWidget):
     def _flush_pending_spread_state(self) -> None:
         if self._pending_spread_state is None:
             self._ui_spread_timer.stop()
+            return
+        # Пока пользователь смотрит другую пару — не рисуем состояние активного воркера в центре
+        if self._runtime_running and self._active_worker_id and not self._slots_match_active_runtime():
+            self._pending_spread_state = None
+            self._ui_spread_timer.stop()
+            self._sync_spread_view_with_slots()
             return
         state = self._pending_spread_state
         self._pending_spread_state = None

@@ -116,7 +116,14 @@ def build_entry_decision(runtime: WorkerRuntime) -> EntryDecision | None:
         runtime._log_entry_blocked(pipeline_block_reason, decision_logged=logged)
         runtime._publish_state()
         return decision
-    if runtime._is_simulated_signal_mode() and not forced_signal and not simulated_window_open:
+    # Window closed blocks *new* entry only; do not block while entry cycle already in flight.
+    if (
+        runtime._is_simulated_signal_mode()
+        and not forced_signal
+        and not simulated_window_open
+        and runtime.active_entry_cycle is None
+        and runtime.prefetch_entry_cycle is None
+    ):
         decision = runtime._make_entry_decision(
             edge_result=simulated_locked_edge_result or raw_edge_result,
             threshold=threshold,

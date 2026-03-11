@@ -19,11 +19,39 @@ class WorkerRuntimeCycleMixin:
             or getattr(self, "prefetch_exit_cycle", None) is not None
         ):
             return False
+        now_ms = int(time.time() * 1000)
+        # One-shot early window after cycle close: after post_cycle delay, allow guard once without waiting full idle.
+        eligible_at = int(getattr(self, "_post_cycle_hedge_eligible_at_ms", 0) or 0)
+        if eligible_at > 0 and now_ms >= eligible_at:
+            self._post_cycle_hedge_eligible_at_ms = 0
+            return True
         last_ts = int(getattr(self, "_last_cycle_activity_ts", 0) or 0)
         if last_ts <= 0:
             return True
         idle_ms = int(getattr(self, "_global_hedge_guard_idle_ms", 2000) or 2000)
-        return (int(time.time() * 1000) - last_ts) >= max(0, idle_ms)
+        return (now_ms - last_ts) >= max(0, idle_ms)
+
+    def _schedule_post_cycle_hedge_check(self) -> None:
+        """After a cycle closes: arm one-shot hedge check after short delay; 2s idle path remains for later retries."""
+        delay_ms = int(getattr(self, "_post_cycle_hedge_guard_ms", 500) or 500)
+        delay_ms = max(0, min(delay_ms, 10_000))
+        now_ms = int(time.time() * 1000)
+        self._post_cycle_hedge_eligible_at_ms = now_ms + delay_ms
+
+        def _fire() -> None:
+            try:
+                if self.state.status != "running":
+                    return
+                self._request_hedge_protection_check(reason="POST_CYCLE_DELAY")
+            except Exception:
+                pass
+
+        if delay_ms <= 0:
+            _fire()
+            return
+        timer = threading.Timer(delay_ms / 1000.0, _fire)
+        timer.daemon = True
+        timer.start()
 
     def _reset_cycle_growth(self, *, reason: str) -> None:
         self._entry_cycle_success_streak = 0
@@ -271,6 +299,7 @@ class WorkerRuntimeCycleMixin:
         if self._entry_pipeline_overlap_enabled():
             self._promote_prefetch_entry_cycle()
         self._sync_active_entry_cycle_metrics()
+        self._schedule_post_cycle_hedge_check()
 
     def _commit_entry_cycle(self) -> None:
         if self.active_entry_cycle is None:
@@ -311,6 +340,7 @@ class WorkerRuntimeCycleMixin:
         self.entry_recovery_plan = None
         self._clear_recovery_status(context="ENTRY_CYCLE")
         self._sync_active_entry_cycle_metrics()
+        self._schedule_post_cycle_hedge_check()
 
     def _sync_active_entry_cycle_from_legs(self) -> None:
         if self.active_entry_cycle is None and self.prefetch_entry_cycle is None:
@@ -482,6 +512,7 @@ class WorkerRuntimeCycleMixin:
         if self._entry_pipeline_overlap_enabled():
             self._promote_prefetch_exit_cycle()
         self._sync_active_exit_cycle_metrics()
+        self._schedule_post_cycle_hedge_check()
 
     def _commit_exit_cycle(self) -> None:
         if self.active_exit_cycle is None:
@@ -517,6 +548,7 @@ class WorkerRuntimeCycleMixin:
         if self._entry_pipeline_overlap_enabled():
             self._promote_prefetch_exit_cycle()
         self._sync_active_exit_cycle_metrics()
+        self._schedule_post_cycle_hedge_check()
 
     def _sync_active_exit_cycle_from_legs(self) -> None:
         if self.active_exit_cycle is None:

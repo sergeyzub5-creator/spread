@@ -47,6 +47,9 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
     EXIT_RECOVERY_DEBOUNCE_MS = 1000
     EXIT_TAIL_RESYNC_MAX_ATTEMPTS = 2
     GLOBAL_HEDGE_GUARD_IDLE_MS = 2000
+    # After a cycle closes, allow hedge protection to run once after this delay
+    # without waiting the full GLOBAL_HEDGE_GUARD_IDLE_MS (2s backstop still applies later).
+    POST_CYCLE_HEDGE_GUARD_IDLE_MS = 500
     EXIT_FLAT_EPSILON = Decimal("0.00000001")
     ENTRY_CYCLE_SETTLE_TIMEOUT_MS = 5000
     EXIT_CYCLE_SETTLE_TIMEOUT_MS = 5000
@@ -166,6 +169,10 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
         self._cycle_growth_idle_reset_ms = idle_reset_ms if idle_reset_ms > 0 else 5000
         global_guard_idle_ms = self._int_or_zero(task.runtime_params.get("global_hedge_guard_idle_ms"))
         self._global_hedge_guard_idle_ms = global_guard_idle_ms if global_guard_idle_ms > 0 else self.GLOBAL_HEDGE_GUARD_IDLE_MS
+        post_cycle_ms = self._int_or_zero(task.runtime_params.get("post_cycle_hedge_guard_idle_ms"))
+        self._post_cycle_hedge_guard_ms = post_cycle_ms if post_cycle_ms > 0 else self.POST_CYCLE_HEDGE_GUARD_IDLE_MS
+        # After cycle commit/finalize: first hedge check allowed at this timestamp (one-shot bypass of long idle).
+        self._post_cycle_hedge_eligible_at_ms: int = 0
         configured_state_publish_interval_ms = self._int_or_zero(task.runtime_params.get("state_publish_interval_ms"))
         self._state_publish_interval_ms = configured_state_publish_interval_ms if configured_state_publish_interval_ms > 0 else 500
         self._last_state_publish_ms = 0

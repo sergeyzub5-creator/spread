@@ -13,6 +13,7 @@ from app.core.execution.bybit_linear_adapter import BybitLinearExecutionAdapter
 from app.core.models.execution import ExecutionOrderRequest, ExecutionOrderResult, ExecutionStreamEvent
 from app.core.models.instrument import InstrumentId
 from app.core.models.market_data import QuoteL1
+from app.core.logging.logger_factory import append_runtime_event
 from app.core.models.workers import StrategyState, WorkerEvent
 
 
@@ -547,7 +548,14 @@ class WorkerRuntimePartsMixin:
             raise
 
     def emit_event(self, event_type: str, payload: dict[str, Any]) -> None:
-        event = WorkerEvent(worker_id=self.task.worker_id, event_type=event_type, timestamp=int(time.time() * 1000), payload=dict(payload))
+        ts_ms = int(time.time() * 1000)
+        event = WorkerEvent(worker_id=self.task.worker_id, event_type=event_type, timestamp=ts_ms, payload=dict(payload))
+        append_runtime_event(
+            worker_id=self.task.worker_id,
+            event_type=event_type,
+            timestamp_ms=ts_ms,
+            payload=event.payload,
+        )
         self.event_bus.publish("worker_events", event)
 
     def _publish_state(self, *, force: bool = False) -> None:

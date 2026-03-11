@@ -95,7 +95,21 @@ class RuntimeStrategyModelTests(unittest.TestCase):
 
         self.assertIsNotNone(edge)
 
-    def test_exit_signal_active_uses_threshold_as_opportunity_floor(self) -> None:
+    def test_exit_signal_active_uses_threshold_as_convergence_ceiling(self) -> None:
+        # Выход когда спред *сузился*: abs(edge) <= порог (не пол как у входа).
+        runtime = SimpleNamespace(
+            _is_spread_entry_runtime=True,
+            position=SimpleNamespace(direction="LEFT_SELL_RIGHT_BUY"),
+            _is_simulated_signal_mode=lambda: False,
+            _simulated_exit_window_open=False,
+            _decimal_or_zero=lambda value: Decimal(str(value)),
+            task=SimpleNamespace(exit_threshold=Decimal("0.1"), runtime_params={}),
+            _current_exit_edge=lambda: Decimal("0.05"),
+        )
+
+        self.assertTrue(exit_signal_active(runtime))
+
+    def test_exit_signal_active_false_when_spread_still_wide(self) -> None:
         runtime = SimpleNamespace(
             _is_spread_entry_runtime=True,
             position=SimpleNamespace(direction="LEFT_SELL_RIGHT_BUY"),
@@ -106,7 +120,7 @@ class RuntimeStrategyModelTests(unittest.TestCase):
             _current_exit_edge=lambda: Decimal("0.25"),
         )
 
-        self.assertTrue(exit_signal_active(runtime))
+        self.assertFalse(exit_signal_active(runtime))
 
     def test_exit_signal_active_uses_abs_edge(self) -> None:
         runtime = SimpleNamespace(
@@ -116,7 +130,7 @@ class RuntimeStrategyModelTests(unittest.TestCase):
             _simulated_exit_window_open=False,
             _decimal_or_zero=lambda value: Decimal(str(value)),
             task=SimpleNamespace(exit_threshold=Decimal("0.1"), runtime_params={}),
-            _current_exit_edge=lambda: Decimal("-0.25"),
+            _current_exit_edge=lambda: Decimal("-0.05"),
         )
 
         self.assertTrue(exit_signal_active(runtime))

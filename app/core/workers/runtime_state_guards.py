@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from app.core.models.workers import StrategyState
+from app.core.workers.runtime_exit_orchestrator import exit_trigger_converged_or_flipped
 
 if TYPE_CHECKING:
     from app.core.workers.runtime_core import WorkerRuntime
@@ -15,11 +16,7 @@ def exit_signal_active(runtime: WorkerRuntime) -> bool:
         return False
     if runtime._is_simulated_signal_mode():
         return runtime._simulated_exit_window_open
-    exit_threshold = runtime._decimal_or_zero(runtime.task.exit_threshold or runtime.task.runtime_params.get("exit_threshold"))
-    if exit_threshold <= Decimal("0"):
-        return False
-    exit_edge = runtime._current_exit_edge()
-    return exit_edge is not None and abs(exit_edge) >= exit_threshold
+    return exit_trigger_converged_or_flipped(runtime)
 
 
 def maybe_restore_in_position_state(runtime: WorkerRuntime) -> bool:

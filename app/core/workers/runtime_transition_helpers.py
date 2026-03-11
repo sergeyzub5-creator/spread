@@ -7,12 +7,32 @@ if TYPE_CHECKING:
     from app.core.workers.runtime_core import WorkerRuntime
 
 
+def _entry_cycle_in_flight(runtime: WorkerRuntime) -> bool:
+    """True if an entry cycle is active or staged — window closing must not block completing it."""
+    return runtime.active_entry_cycle is not None or runtime.prefetch_entry_cycle is not None
+
+
+def _exit_cycle_in_flight(runtime: WorkerRuntime) -> bool:
+    """True if an exit cycle is active or staged — window closing must not block completing it."""
+    return runtime.active_exit_cycle is not None or getattr(runtime, "prefetch_exit_cycle", None) is not None
+
+
 def chain_allowed(runtime: WorkerRuntime, *, side: str) -> bool:
+    """
+    Simulated window is a trigger to *start* a cycle only.
+    If a cycle already started (active/prefetch slot), chain/recovery must continue even after window closes.
+    """
     normalized = str(side or "").strip().lower()
+    if not runtime._is_simulated_signal_mode():
+        return True
     if normalized == "entry":
-        return not (runtime._is_simulated_signal_mode() and not runtime._simulated_entry_window_open)
+        if _entry_cycle_in_flight(runtime):
+            return True
+        return bool(runtime._simulated_entry_window_open)
     if normalized == "exit":
-        return not (runtime._is_simulated_signal_mode() and not runtime._simulated_exit_window_open)
+        if _exit_cycle_in_flight(runtime):
+            return True
+        return bool(runtime._simulated_exit_window_open)
     return True
 
 

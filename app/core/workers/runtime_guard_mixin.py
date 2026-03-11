@@ -980,6 +980,11 @@ class WorkerRuntimeGuardMixin:
             if fallback_left in {"BUY", "SELL"} and fallback_right in {"BUY", "SELL"}:
                 direction = f"LEFT_{fallback_left}_RIGHT_{fallback_right}"
         entry_edge = self.position.entry_edge if self.position is not None else None
+        # Знаковый спред в момент входа — ось для порога выхода (например вход при -1, порог -0.2 → выход при current > -0.2).
+        if entry_edge is None and self.active_entry_cycle is not None and self.active_entry_cycle.edge_value is not None:
+            entry_edge = self.active_entry_cycle.edge_value
+        elif entry_edge is None and self.last_entry_cycle is not None and self.last_entry_cycle.edge_value is not None:
+            entry_edge = self.last_entry_cycle.edge_value
         active_edge = None
         if direction == "LEFT_SELL_RIGHT_BUY":
             active_edge = "edge_1"
