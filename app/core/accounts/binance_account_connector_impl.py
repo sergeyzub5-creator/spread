@@ -26,10 +26,13 @@ class BinanceApiError(RuntimeError):
 class BinanceAccountConnector:
     SPOT_BASE_URL = "https://api.binance.com"
     FUTURES_BASE_URL = "https://fapi.binance.com"
+    PAPI_BASE_URL = "https://papi.binance.com"
     SPOT_TIME_PATH = "/api/v3/time"
     FUTURES_TIME_PATH = "/fapi/v1/time"
     SPOT_ACCOUNT_PATH = "/api/v3/account"
     FUTURES_ACCOUNT_PATH = "/fapi/v3/account"
+    PAPI_ACCOUNT_PATH = "/papi/v1/account"
+    PAPI_UM_ACCOUNT_PATH = "/papi/v1/um/account"
     FUTURES_POSITION_MODE_PATH = "/fapi/v1/positionSide/dual"
     CLOSE_REFRESH_TIMEOUT_SECONDS = 20.0
     CLOSE_REFRESH_POLL_SECONDS = 0.35
@@ -41,8 +44,10 @@ class BinanceAccountConnector:
     def connect(self, credentials: ExchangeCredentials) -> ExchangeAccountSnapshot:
         spot_payload = None
         futures_payload = None
+        portfolio_payload = None
+        portfolio_um_payload = None
         spot_error: Exception | None = None
-        futures_error: Exception | None = None
+        derivatives_error: Exception | None = None
 
         try:
             spot_payload = self._signed_get(
@@ -57,21 +62,84 @@ class BinanceAccountConnector:
             self._logger.warning("binance spot account check failed: %s", exc)
 
         try:
-            futures_payload = self._signed_get(
-                base_url=self.FUTURES_BASE_URL,
-                time_path=self.FUTURES_TIME_PATH,
-                path=self.FUTURES_ACCOUNT_PATH,
-                credentials=credentials,
-            )
-            self._logger.info("binance futures account verified")
+            derivatives_mode, derivatives_payloads = self._load_derivatives_account(credentials)
+            futures_payload = derivatives_payloads.get("futures")
+            portfolio_payload = derivatives_payloads.get("portfolio")
+            portfolio_um_payload = derivatives_payloads.get("portfolio_um")
+            if derivatives_mode == "portfolio_margin":
+                self._logger.info("binance account type detected: portfolio margin")
+            elif derivatives_mode == "usdm_futures":
+                self._logger.info("binance account type detected: separate usdm futures")
         except Exception as exc:
-            futures_error = exc
-            self._logger.warning("binance futures account check failed: %s", exc)
+            derivatives_error = exc
+            self._logger.warning("binance derivatives account check failed: %s", exc)
 
-        if spot_payload is None and futures_payload is None:
-            raise BinanceApiError(self._format_connection_error(spot_error, futures_error))
+        if spot_payload is None and futures_payload is None and portfolio_um_payload is None:
+            raise BinanceApiError(self._format_connection_error(spot_error, derivatives_error))
 
-        return self._build_snapshot(spot_payload, futures_payload)
+        return self._build_snapshot(spot_payload, futures_payload, portfolio_payload, portfolio_um_payload)
+
+    def _load_derivatives_account(self, credentials: ExchangeCredentials) -> tuple[str, dict[str, dict[str, Any]]]:
+        profile = dict(getattr(credentials, "account_profile", {}) or {})
+        hinted_type = str(profile.get("account_type") or profile.get("account_mode") or "").strip().lower()
+
+        if hinted_type in {"portfolio_margin", "portfolio"}:
+            portfolio_payload, portfolio_um_payload = self._load_portfolio_margin_account(credentials)
+            return "portfolio_margin", {
+                "portfolio": portfolio_payload,
+                "portfolio_um": portfolio_um_payload,
+            }
+
+        if hinted_type in {"separate_spot_and_usdm", "classic", "usdm_futures"}:
+            futures_payload = self._load_classic_futures_account(credentials)
+            return "usdm_futures", {"futures": futures_payload}
+
+        portfolio_probe_error: Exception | None = None
+        try:
+            portfolio_payload, portfolio_um_payload = self._load_portfolio_margin_account(credentials)
+            return "portfolio_margin", {
+                "portfolio": portfolio_payload,
+                "portfolio_um": portfolio_um_payload,
+            }
+        except Exception as exc:
+            portfolio_probe_error = exc
+
+        try:
+            futures_payload = self._load_classic_futures_account(credentials)
+            return "usdm_futures", {"futures": futures_payload}
+        except Exception as exc:
+            raise BinanceApiError(self._format_connection_error(None, exc, portfolio_probe_error)) from exc
+
+    def _load_classic_futures_account(self, credentials: ExchangeCredentials) -> dict[str, Any]:
+        futures_payload = self._signed_get(
+            base_url=self.FUTURES_BASE_URL,
+            time_path=self.FUTURES_TIME_PATH,
+            path=self.FUTURES_ACCOUNT_PATH,
+            credentials=credentials,
+        )
+        self._logger.info("binance futures account verified")
+        return futures_payload
+
+    def _load_portfolio_margin_account(
+        self,
+        credentials: ExchangeCredentials,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        portfolio_payload = self._signed_get(
+            base_url=self.PAPI_BASE_URL,
+            time_base_url=self.SPOT_BASE_URL,
+            time_path=self.SPOT_TIME_PATH,
+            path=self.PAPI_ACCOUNT_PATH,
+            credentials=credentials,
+        )
+        portfolio_um_payload = self._signed_get(
+            base_url=self.PAPI_BASE_URL,
+            time_base_url=self.SPOT_BASE_URL,
+            time_path=self.SPOT_TIME_PATH,
+            path=self.PAPI_UM_ACCOUNT_PATH,
+            credentials=credentials,
+        )
+        self._logger.info("binance portfolio margin account verified")
+        return portfolio_payload, portfolio_um_payload
 
     def close_all_positions(self, credentials: ExchangeCredentials) -> ClosePositionsResult:
         futures_payload = self._signed_get(
@@ -160,6 +228,8 @@ class BinanceAccountConnector:
         self,
         spot_payload: dict[str, Any] | None,
         futures_payload: dict[str, Any] | None,
+        portfolio_payload: dict[str, Any] | None = None,
+        portfolio_um_payload: dict[str, Any] | None = None,
     ) -> ExchangeAccountSnapshot:
         spot_enabled = spot_payload is not None
         futures_enabled = futures_payload is not None
@@ -185,6 +255,42 @@ class BinanceAccountConnector:
                     "supports_futures": futures_enabled,
                     "preferred_execution_route": "binance_usdm_trade_ws" if futures_enabled else None,
                     "detected_via": ["spot_account", "futures_account"],
+                },
+            )
+
+        if portfolio_um_payload is not None:
+            portfolio_positions = portfolio_um_payload.get("positions", [])
+            wallet_balance = self._first_decimal(
+                portfolio_um_payload,
+                "totalWalletBalance",
+                "totalMarginBalance",
+                "totalCrossWalletBalance",
+            )
+            account_equity = self._first_decimal(
+                portfolio_payload or {},
+                "accountEquity",
+                "totalWalletBalance",
+                "totalMarginBalance",
+            )
+            balance_value = account_equity if account_equity != Decimal("0") else wallet_balance
+            unrealized_pnl = self._open_positions_unrealized_pnl(portfolio_positions)
+            can_trade = bool(portfolio_um_payload.get("canTrade", True))
+            return ExchangeAccountSnapshot(
+                exchange="binance",
+                status_text=self._status_text(spot_enabled, True, can_trade, account_label="Portfolio Margin"),
+                balance_text=f"Баланс: {self._fmt_decimal(balance_value)} USD",
+                positions_text=self._positions_text(portfolio_positions),
+                pnl_text=self._format_pnl_text(unrealized_pnl, "USDT"),
+                spot_enabled=spot_enabled,
+                futures_enabled=True,
+                can_trade=can_trade,
+                account_profile={
+                    "account_type": "portfolio_margin",
+                    "account_mode": "portfolio_margin",
+                    "supports_spot": spot_enabled,
+                    "supports_futures": True,
+                    "preferred_execution_route": "binance_usdm_trade_ws",
+                    "detected_via": ["spot_account", "papi_account", "papi_um_account"],
                 },
             )
 
@@ -229,13 +335,20 @@ class BinanceAccountConnector:
         )
 
     @staticmethod
-    def _status_text(spot_enabled: bool, futures_enabled: bool, can_trade: bool) -> str:
+    def _status_text(
+        spot_enabled: bool,
+        futures_enabled: bool,
+        can_trade: bool,
+        account_label: str | None = None,
+    ) -> str:
         segments: list[str] = []
         if spot_enabled:
             segments.append("Spot")
         if futures_enabled:
             segments.append("Futures")
         suffix = " + ".join(segments) if segments else "API"
+        if account_label:
+            suffix = f"{suffix} · {account_label}"
         if not can_trade:
             return f"Подключено · {suffix} · read-only"
         return f"Подключено · {suffix}"
@@ -251,6 +364,18 @@ class BinanceAccountConnector:
         except (InvalidOperation, ValueError):
             return Decimal("0")
 
+    @classmethod
+    def _first_decimal(cls, payload: dict[str, Any], *keys: str) -> Decimal:
+        for key in keys:
+            if key in payload:
+                value = cls._decimal_value(payload.get(key))
+                if value != Decimal("0"):
+                    return value
+        for key in keys:
+            if key in payload:
+                return cls._decimal_value(payload.get(key))
+        return Decimal("0")
+
     def _signed_get(
         self,
         *,
@@ -258,10 +383,12 @@ class BinanceAccountConnector:
         time_path: str,
         path: str,
         credentials: ExchangeCredentials,
+        time_base_url: str | None = None,
     ) -> dict[str, Any]:
         return self._signed_request(
             method="GET",
             base_url=base_url,
+            time_base_url=time_base_url,
             time_path=time_path,
             path=path,
             credentials=credentials,
@@ -272,12 +399,13 @@ class BinanceAccountConnector:
         *,
         method: str,
         base_url: str,
+        time_base_url: str | None,
         time_path: str,
         path: str,
         credentials: ExchangeCredentials,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        server_time_payload = self._public_get(base_url=base_url, path=time_path)
+        server_time_payload = self._public_get(base_url=time_base_url or base_url, path=time_path)
         timestamp = int(server_time_payload.get("serverTime", 0))
         signed_params = {key: value for key, value in (params or {}).items() if value is not None}
         signed_params["recvWindow"] = "5000"
@@ -337,13 +465,20 @@ class BinanceAccountConnector:
         return f"http {error.code}"
 
     @staticmethod
-    def _format_connection_error(spot_error: Exception | None, futures_error: Exception | None) -> str:
-        if spot_error and futures_error:
-            return f"Spot: {spot_error}; Futures: {futures_error}"
-        if futures_error:
-            return str(futures_error)
+    def _format_connection_error(
+        spot_error: Exception | None,
+        futures_error: Exception | None,
+        portfolio_error: Exception | None = None,
+    ) -> str:
+        parts: list[str] = []
         if spot_error:
-            return str(spot_error)
+            parts.append(f"Spot: {spot_error}")
+        if futures_error:
+            parts.append(f"Futures: {futures_error}")
+        if portfolio_error:
+            parts.append(f"Portfolio Margin: {portfolio_error}")
+        if parts:
+            return "; ".join(parts)
         return "Unknown Binance connection error"
 
     def _refresh_snapshot_after_close(self, credentials: ExchangeCredentials) -> ExchangeAccountSnapshot:

@@ -40,9 +40,25 @@ class BybitLinearExecutionAdapter(ExecutionAdapter):
         on_request_sent: Callable[[dict[str, Any]], None] | None = None,
     ) -> ExecutionOrderResult:
         self._assert_route(request.instrument_id.routing.order_route)
-        payload = self._build_place_order_payload(request)
-        response = self._transport.request("order.create", payload, on_request_sent=on_request_sent)
-        result = self._normalize_result(response, request=request)
+        effective_request = request
+        payload = self._build_place_order_payload(effective_request)
+        try:
+            response = self._transport.request("order.create", payload, on_request_sent=on_request_sent)
+        except Exception as exc:
+            retry_request = self._retry_request_with_inferred_position_idx(request, exc)
+            if retry_request is None:
+                raise
+            effective_request = retry_request
+            payload = self._build_place_order_payload(effective_request)
+            self._logger.warning(
+                "bybit order.create retry with inferred positionIdx | symbol=%s | side=%s | position_idx=%s | reason=%s",
+                effective_request.instrument_id.symbol,
+                effective_request.side,
+                effective_request.position_idx,
+                exc,
+            )
+            response = self._transport.request("order.create", payload, on_request_sent=on_request_sent)
+        result = self._normalize_result(response, request=effective_request)
         self._logger.info(
             "bybit order.create ack | symbol=%s | order_id=%s | status=%s",
             result.symbol,
@@ -164,3 +180,39 @@ class BybitLinearExecutionAdapter(ExecutionAdapter):
     def _assert_route(self, route_name: str) -> None:
         if route_name != self.ROUTE_NAME:
             raise ValueError(f"Unsupported execution route: {route_name}")
+
+    @staticmethod
+    def _retry_request_with_inferred_position_idx(
+        request: ExecutionOrderRequest,
+        error: Exception,
+    ) -> ExecutionOrderRequest | None:
+        if request.position_idx is not None:
+            return None
+        if bool(request.reduce_only):
+            return None
+        side = str(request.side or "").strip().upper()
+        if side not in {"BUY", "SELL"}:
+            return None
+        error_text = str(error or "").strip().lower()
+        if "position idx" not in error_text and "positionidx" not in error_text and "position mode" not in error_text:
+            return None
+        inferred_position_idx = 1 if side == "BUY" else 2
+        return ExecutionOrderRequest(
+            instrument_id=request.instrument_id,
+            side=request.side,
+            order_type=request.order_type,
+            quantity=request.quantity,
+            price=request.price,
+            time_in_force=request.time_in_force,
+            position_side=request.position_side,
+            position_idx=inferred_position_idx,
+            reduce_only=request.reduce_only,
+            close_position=request.close_position,
+            new_client_order_id=request.new_client_order_id,
+            response_type=request.response_type,
+            stop_price=request.stop_price,
+            activation_price=request.activation_price,
+            callback_rate=request.callback_rate,
+            working_type=request.working_type,
+            price_protect=request.price_protect,
+        )

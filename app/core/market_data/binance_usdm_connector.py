@@ -113,9 +113,12 @@ class BinanceUsdmPublicConnector(PublicMarketDataConnector):
                 on_close=lambda ws, status_code, message: self._on_close(status_code, message),
             )
             try:
-                self._ws_app.run_forever()
+                self._ws_app.run_forever(ping_interval=20, ping_timeout=10)
             except Exception as exc:  # pragma: no cover
                 self.logger.error("binance public ws loop crashed: %s", exc)
+            finally:
+                with self._lock:
+                    self._ws_app = None
 
             if self._closing:
                 break
@@ -164,6 +167,15 @@ class BinanceUsdmPublicConnector(PublicMarketDataConnector):
                 self.logger.error("binance public quote callback failed: %s", exc)
 
     def _on_error(self, error: Any) -> None:
+        error_text = str(error or "").strip()
+        self._connected = False
+        self._last_disconnect_ts_ms = int(time.time() * 1000)
+        if self._closing:
+            self.logger.info("binance public ws closing | error=%s", error_text)
+            return
+        if error_text in {"Connection to remote host was lost.", "socket is already closed.", "'NoneType' object has no attribute 'sock'"}:
+            self.logger.warning("binance public ws disconnected: %s", error_text)
+            return
         self.logger.error("binance public ws error: %s", error)
 
     def _on_close(self, status_code: Any, message: Any) -> None:

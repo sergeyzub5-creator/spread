@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMainWindow, QM
 
 from app.core.logging.logger_factory import get_logger
 from app.ui.i18n import get_language_manager, tr
+from app.ui.tabs.position_manager_tab import PositionManagerTab
 from app.ui.tabs.exchanges_mock_tab import ExchangesMockTab
 from app.ui.tabs.spread_mock_tab import SpreadMockTab
 from app.ui.theme import build_app_stylesheet, get_theme_manager, theme_color
@@ -50,15 +51,17 @@ class AppWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.exchanges_tab = ExchangesMockTab(coordinator=self.coordinator)
         self.spread_tab = SpreadMockTab(coordinator=self.coordinator)
+        self.position_manager_tab = PositionManagerTab(coordinator=self.coordinator)
         self.tabs.addTab(self.exchanges_tab, tr("tab.exchanges"))
         self.tabs.addTab(self.spread_tab, tr("tab.spread"))
+        self.tabs.addTab(self.position_manager_tab, tr("tab.position_manager"))
         self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs)
 
         self.status_bar = NetworkStatusBar()
         layout.addWidget(self.status_bar)
 
-        for tab in (self.exchanges_tab, self.spread_tab):
+        for tab in (self.exchanges_tab, self.spread_tab, self.position_manager_tab):
             tab.action_triggered.connect(self._on_tab_action)
 
         self._apply_theme()
@@ -98,7 +101,6 @@ class AppWindow(QMainWindow):
         self.language_btn.setText("\U0001F310")
         self.language_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.language_btn.setMenu(self.language_menu)
-        self.language_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.language_btn.setFixedSize(22, 22)
         self.language_group_layout.addWidget(self.language_btn)
         self.top_controls.addWidget(self.language_group, 0, Qt.AlignmentFlag.AlignRight)
@@ -107,13 +109,11 @@ class AppWindow(QMainWindow):
         self.settings_btn = QToolButton()
         self.settings_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.settings_btn.setMenu(self.settings_menu)
-        self.settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.settings_btn.setMinimumWidth(130)
         self.settings_btn.setFixedHeight(24)
         self.top_controls.addWidget(self.settings_btn, 0, Qt.AlignmentFlag.AlignRight)
 
         self.diagnostics_btn = QToolButton()
-        self.diagnostics_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.diagnostics_btn.setMinimumWidth(140)
         self.diagnostics_btn.setFixedHeight(24)
         self.diagnostics_btn.clicked.connect(self._open_diagnostics_window)
@@ -143,7 +143,8 @@ class AppWindow(QMainWindow):
     @staticmethod
     def _build_menu_font() -> QFont:
         font = QFont("Segoe UI")
-        font.setPointSize(9)
+        if 9 > 0:
+            font.setPointSize(9)
         font.setWeight(QFont.Weight.DemiBold)
         return font
 
@@ -261,12 +262,14 @@ class AppWindow(QMainWindow):
         self._sync_header_side_widths()
         self.exchanges_tab.apply_theme()
         self.spread_tab.apply_theme()
+        self.position_manager_tab.apply_theme()
         self.status_bar.apply_theme()
 
     @staticmethod
     def _build_top_font(weight: QFont.Weight) -> QFont:
         font = QFont("Segoe UI")
-        font.setPointSize(10)
+        if 10 > 0:
+            font.setPointSize(10)
         font.setWeight(weight)
         return font
 
@@ -278,10 +281,12 @@ class AppWindow(QMainWindow):
         self.diagnostics_btn.setText(tr("spread.diagnostics"))
         self.tabs.setTabText(0, tr("tab.exchanges"))
         self.tabs.setTabText(1, tr("tab.spread"))
+        self.tabs.setTabText(2, tr("tab.position_manager"))
         self._build_language_menu()
         self._build_settings_menu()
         self.exchanges_tab.retranslate_ui()
         self.spread_tab.retranslate_ui()
+        self.position_manager_tab.retranslate_ui()
         self.status_bar.retranslate_ui()
 
     def _on_tab_changed(self, index: int) -> None:
@@ -354,4 +359,3 @@ class AppWindow(QMainWindow):
     def _open_diagnostics_window(self) -> None:
         if hasattr(self, "spread_tab") and self.spread_tab is not None:
             self.spread_tab._open_diagnostics_window()
-

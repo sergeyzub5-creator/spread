@@ -28,6 +28,23 @@ def format_edge(value: Decimal | None) -> str | None:
     return f"{value:.6f}"
 
 
+def mid_spread_ratio(left_quote: QuoteL1 | None, right_quote: QuoteL1 | None) -> Decimal | None:
+    """
+    Magnitude of spread using mids only — same scale as safe_edge(book) for threshold compare.
+    Uses (left_mid - right_mid) / right_mid; returns abs() so |mid| crosses same entry_threshold line.
+    """
+    if left_quote is None or right_quote is None:
+        return None
+    try:
+        left_mid = (left_quote.bid + left_quote.ask) / Decimal("2")
+        right_mid = (right_quote.bid + right_quote.ask) / Decimal("2")
+    except Exception:
+        return None
+    if right_mid <= Decimal("0"):
+        return None
+    return abs((left_mid - right_mid) / right_mid)
+
+
 def calculate_spread_edges(left_quote: QuoteL1 | None, right_quote: QuoteL1 | None) -> SpreadEdgeResult:
     if left_quote is None or right_quote is None:
         return SpreadEdgeResult(None, None, None, None, None, None)

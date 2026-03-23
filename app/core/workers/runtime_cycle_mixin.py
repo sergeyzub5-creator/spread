@@ -128,6 +128,18 @@ class WorkerRuntimeCycleMixin:
         self.state.metrics["entry_growth_limit_notional_usdt"] = None
         self.state.metrics["entry_growth_limit_qty"] = None
 
+    def _rebind_restored_position_to_current_task(self, *, reason: str) -> None:
+        if self.position is not None:
+            return
+        had_growth_limit = bool(self._entry_growth_limited or self._entry_growth_limit_pending)
+        if had_growth_limit:
+            self.logger.info(
+                "restored position rebound to current task | reason=%s | previous_growth_limit_reason=%s",
+                reason,
+                self._entry_growth_limit_reason or self._entry_growth_limit_pending_reason,
+            )
+        self._clear_entry_growth_limited()
+
     def _mark_entry_growth_limit_pending(self, *, reason: str) -> None:
         self._entry_growth_limit_pending = True
         self._entry_growth_limit_pending_reason = reason

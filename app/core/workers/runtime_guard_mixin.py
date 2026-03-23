@@ -301,8 +301,7 @@ class WorkerRuntimeGuardMixin:
                 self.state.metrics["last_result"] = "RECONCILED_IDLE"
                 should_resume_entry = True
             elif left_actual == right_actual:
-                if self._entry_growth_limit_pending and not self._entry_growth_limited:
-                    self._set_entry_growth_limited(reason=self._entry_growth_limit_pending_reason or "MARGIN_LIMIT_REACHED")
+                self._rebind_restored_position_to_current_task(reason=f"RECONCILE_HEDGED:{reason}")
                 self._sync_position_from_legs()
                 self._settle_dual_execution_state(reason=f"RECONCILE_HEDGED:{reason}", force=True)
                 self._set_strategy_state(StrategyState.IN_POSITION)
@@ -665,6 +664,14 @@ class WorkerRuntimeGuardMixin:
         except Exception as exc:
             self.state.metrics["hedge_status"] = "WAIT_POSITION_RESYNC"
             self.logger.warning("hedge protection resync failed | reason=%s | error=%s", reason, exc)
+            self.emit_event(
+                "hedge_protection_resync_failed",
+                {
+                    "reason": reason,
+                    "error": str(exc),
+                    "hedge_status": self.state.metrics.get("hedge_status"),
+                },
+            )
             return False
         with self._state_lock:
             if self._hedge_must_yield_to_cycle_owner():
@@ -983,13 +990,12 @@ class WorkerRuntimeGuardMixin:
         # Знаковый спред в момент входа — ось для порога выхода (например вход при -1, порог -0.2 → выход при current > -0.2).
         if entry_edge is None and self.active_entry_cycle is not None and self.active_entry_cycle.edge_value is not None:
             entry_edge = self.active_entry_cycle.edge_value
-        elif entry_edge is None and self.last_entry_cycle is not None and self.last_entry_cycle.edge_value is not None:
-            entry_edge = self.last_entry_cycle.edge_value
-        active_edge = None
-        if direction == "LEFT_SELL_RIGHT_BUY":
-            active_edge = "edge_1"
-        elif direction == "LEFT_BUY_RIGHT_SELL":
-            active_edge = "edge_2"
+        active_edge = self.position.active_edge if self.position is not None else None
+        if active_edge is None and entry_edge is not None:
+            if direction == "LEFT_SELL_RIGHT_BUY":
+                active_edge = "edge_1"
+            elif direction == "LEFT_BUY_RIGHT_SELL":
+                active_edge = "edge_2"
         entry_time = self.position.entry_time if self.position is not None else self.last_entry_ts
         self.position = StrategyPosition(
             direction=direction,

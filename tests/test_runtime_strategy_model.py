@@ -5,7 +5,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from app.core.workers.runtime_execution_mixin import WorkerRuntimeExecutionMixin
-from app.core.workers.runtime_exit_orchestrator import current_exit_edge, exit_sides_for_position
+from app.core.workers.runtime_guard_mixin import WorkerRuntimeGuardMixin
+from app.core.workers.runtime_exit_orchestrator import build_exit_decision, current_exit_edge, exit_sides_for_position
 from app.core.workers.runtime_sizing_mixin import WorkerRuntimeSizingMixin
 from app.core.workers.runtime_state_guards import exit_signal_active
 
@@ -27,6 +28,80 @@ class _FakeExecutionRuntime(WorkerRuntimeExecutionMixin):
     def __init__(self, *, left_side: str | None, left_qty: Decimal) -> None:
         self.left_leg_state = SimpleNamespace(side=left_side, filled_qty=left_qty)
         self.right_leg_state = SimpleNamespace(side=None, filled_qty=Decimal("0"))
+
+
+class _InstrumentKey:
+    def __init__(self) -> None:
+        self.spec = SimpleNamespace(min_qty=Decimal("0.001"))
+
+    def __hash__(self) -> int:
+        return id(self)
+
+
+class _FakeExitDecisionRuntime:
+    def __init__(self) -> None:
+        self._left_instrument = _InstrumentKey()
+        self._right_instrument = _InstrumentKey()
+        self._latest_quotes = {
+            self._left_instrument: SimpleNamespace(bid=Decimal("80"), ask=Decimal("95")),
+            self._right_instrument: SimpleNamespace(bid=Decimal("100"), ask=Decimal("101")),
+        }
+        self.position = SimpleNamespace(
+            direction="LEFT_SELL_RIGHT_BUY",
+            entry_edge=Decimal("-0.50"),
+            active_edge="edge_1",
+            left_side="SELL",
+            right_side="BUY",
+        )
+        self.left_leg_state = SimpleNamespace(side="SELL", filled_qty=Decimal("1"), actual_position_qty=Decimal("1"))
+        self.right_leg_state = SimpleNamespace(side="BUY", filled_qty=Decimal("1"), actual_position_qty=Decimal("1"))
+        self.task = SimpleNamespace(exit_threshold=Decimal("0.10"), runtime_params={})
+        self.active_exit_cycle = None
+        self.prefetch_exit_cycle = None
+
+    def _decimal_or_zero(self, value) -> Decimal:
+        return Decimal(str(value))
+
+    def _is_simulated_signal_mode(self) -> bool:
+        return False
+
+    def _has_live_leg_orders(self) -> bool:
+        return False
+
+    def _safe_edge(self, a: Decimal, b: Decimal) -> Decimal | None:
+        return (a - b) / b if b > Decimal("0") else None
+
+    def _compute_shared_dual_leg_quantity(self, **_kwargs) -> Decimal:
+        return Decimal("1")
+
+    def _exit_cycle_notional_usdt(self) -> Decimal:
+        return Decimal("100")
+
+    def _current_exit_edge(self) -> Decimal | None:
+        return current_exit_edge(self)
+
+
+class _FakeRestoreRuntime(WorkerRuntimeGuardMixin):
+    def __init__(self) -> None:
+        self.position = None
+        self.active_entry_cycle = None
+        self.last_entry_cycle = SimpleNamespace(edge_value=Decimal("-0.50"))
+        self.left_leg_state = SimpleNamespace(
+            side="SELL",
+            filled_qty=Decimal("1"),
+            avg_price=Decimal("100"),
+        )
+        self.right_leg_state = SimpleNamespace(
+            side="BUY",
+            filled_qty=Decimal("1"),
+            avg_price=Decimal("101"),
+        )
+        self.last_entry_ts = 123
+        self.state = SimpleNamespace(metrics={})
+
+    @staticmethod
+    def _format_edge(value):
+        return None if value is None else str(value)
 
 
 class RuntimeStrategyModelTests(unittest.TestCase):
@@ -134,6 +209,29 @@ class RuntimeStrategyModelTests(unittest.TestCase):
         )
 
         self.assertTrue(exit_signal_active(runtime))
+
+    def test_exit_signal_active_does_not_flip_early_when_signed_threshold_not_reached(self) -> None:
+        runtime = _FakeExitDecisionRuntime()
+        runtime._is_spread_entry_runtime = True
+        runtime._simulated_exit_window_open = False
+
+        self.assertFalse(exit_signal_active(runtime))
+
+    def test_build_exit_decision_does_not_use_fallback_when_signed_context_exists(self) -> None:
+        runtime = _FakeExitDecisionRuntime()
+
+        decision = build_exit_decision(runtime)
+
+        self.assertIsNone(decision)
+
+    def test_restored_position_does_not_inherit_stale_last_entry_context(self) -> None:
+        runtime = _FakeRestoreRuntime()
+
+        runtime._sync_position_from_legs()
+
+        self.assertIsNotNone(runtime.position)
+        self.assertIsNone(runtime.position.entry_edge)
+        self.assertIsNone(runtime.position.active_edge)
 
 
 if __name__ == "__main__":

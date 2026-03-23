@@ -2418,7 +2418,8 @@ class WorkerRuntimeExecutionMixin:
         )
         positions = payload.get("positions", []) if isinstance(payload, dict) else []
         expected_entry_side = str(self._leg_state(leg_name).side or "").upper()
-        total = Decimal("0")
+        long_total = Decimal("0")
+        short_total = Decimal("0")
         for item in positions if isinstance(positions, list) else []:
             if not isinstance(item, dict):
                 continue
@@ -2428,13 +2429,31 @@ class WorkerRuntimeExecutionMixin:
             if position_amt == Decimal("0"):
                 continue
             position_side = str(item.get("positionSide", "")).strip().upper()
-            if expected_entry_side == "BUY":
-                if position_amt > Decimal("0") or position_side == "LONG":
-                    total += abs(position_amt)
-            elif expected_entry_side == "SELL":
-                if position_amt < Decimal("0") or position_side == "SHORT":
-                    total += abs(position_amt)
-        return total
+            if position_amt > Decimal("0") or position_side == "LONG":
+                long_total += abs(position_amt)
+            elif position_amt < Decimal("0") or position_side == "SHORT":
+                short_total += abs(position_amt)
+        if expected_entry_side == "BUY":
+            if long_total > Decimal("0"):
+                return long_total
+            if short_total > Decimal("0"):
+                self._leg_state(leg_name).side = "SELL"
+                return short_total
+            return Decimal("0")
+        if expected_entry_side == "SELL":
+            if short_total > Decimal("0"):
+                return short_total
+            if long_total > Decimal("0"):
+                self._leg_state(leg_name).side = "BUY"
+                return long_total
+            return Decimal("0")
+        if long_total >= short_total and long_total > Decimal("0"):
+            self._leg_state(leg_name).side = "BUY"
+            return long_total
+        if short_total > Decimal("0"):
+            self._leg_state(leg_name).side = "SELL"
+            return short_total
+        return Decimal("0")
 
     def _resync_bitget_position_qty(self, *, leg_name: str, credentials, symbol: str) -> Decimal:
         client = BitgetSignedHttpClient(credentials)
@@ -2442,32 +2461,82 @@ class WorkerRuntimeExecutionMixin:
             BitgetAccountConnector.FUTURES_POSITIONS_PATH,
             params={"productType": BitgetAccountConnector.PRODUCT_TYPE, "marginCoin": BitgetAccountConnector.MARGIN_COIN},
         ).get("data", [])
-        expected_hold_side = "long" if str(self._leg_state(leg_name).side or "").upper() == "BUY" else "short"
-        total = Decimal("0")
+        expected_entry_side = str(self._leg_state(leg_name).side or "").upper()
+        long_total = Decimal("0")
+        short_total = Decimal("0")
         for item in positions if isinstance(positions, list) else []:
             if not isinstance(item, dict):
                 continue
             if str(item.get("symbol", "")).strip().upper() != str(symbol or "").strip().upper():
                 continue
             hold_side = str(item.get("holdSide", "") or item.get("posSide", "")).strip().lower()
-            if hold_side and hold_side != expected_hold_side:
+            qty = BitgetAccountConnector._decimal_value(item.get("total"))
+            if qty <= Decimal("0"):
                 continue
-            total += BitgetAccountConnector._decimal_value(item.get("total"))
-        return total
+            if hold_side == "long":
+                long_total += qty
+            elif hold_side == "short":
+                short_total += qty
+        if expected_entry_side == "BUY":
+            if long_total > Decimal("0"):
+                return long_total
+            if short_total > Decimal("0"):
+                self._leg_state(leg_name).side = "SELL"
+                return short_total
+            return Decimal("0")
+        if expected_entry_side == "SELL":
+            if short_total > Decimal("0"):
+                return short_total
+            if long_total > Decimal("0"):
+                self._leg_state(leg_name).side = "BUY"
+                return long_total
+            return Decimal("0")
+        if long_total >= short_total and long_total > Decimal("0"):
+            self._leg_state(leg_name).side = "BUY"
+            return long_total
+        if short_total > Decimal("0"):
+            self._leg_state(leg_name).side = "SELL"
+            return short_total
+        return Decimal("0")
 
     def _resync_bybit_position_qty(self, *, leg_name: str, credentials, symbol: str) -> Decimal:
         connector = BybitAccountConnector()
         client = BybitV5HttpClient(credentials, timeout_seconds=connector._client_timeout_seconds)
         positions = connector._load_linear_positions(client)
-        expected_side = "BUY" if str(self._leg_state(leg_name).side or "").upper() == "BUY" else "SELL"
-        total = Decimal("0")
+        expected_entry_side = str(self._leg_state(leg_name).side or "").upper()
+        buy_total = Decimal("0")
+        sell_total = Decimal("0")
         for item in positions if isinstance(positions, list) else []:
             if not isinstance(item, dict):
                 continue
             if str(item.get("symbol", "")).strip().upper() != str(symbol or "").strip().upper():
                 continue
             side = str(item.get("side", "")).strip().upper()
-            if side and side != expected_side:
+            qty = BybitAccountConnector._decimal_value(item.get("size"))
+            if qty <= Decimal("0"):
                 continue
-            total += BybitAccountConnector._decimal_value(item.get("size"))
-        return total
+            if side == "BUY":
+                buy_total += qty
+            elif side == "SELL":
+                sell_total += qty
+        if expected_entry_side == "BUY":
+            if buy_total > Decimal("0"):
+                return buy_total
+            if sell_total > Decimal("0"):
+                self._leg_state(leg_name).side = "SELL"
+                return sell_total
+            return Decimal("0")
+        if expected_entry_side == "SELL":
+            if sell_total > Decimal("0"):
+                return sell_total
+            if buy_total > Decimal("0"):
+                self._leg_state(leg_name).side = "BUY"
+                return buy_total
+            return Decimal("0")
+        if buy_total >= sell_total and buy_total > Decimal("0"):
+            self._leg_state(leg_name).side = "BUY"
+            return buy_total
+        if sell_total > Decimal("0"):
+            self._leg_state(leg_name).side = "SELL"
+            return sell_total
+        return Decimal("0")

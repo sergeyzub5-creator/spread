@@ -175,7 +175,7 @@ class RuntimeTestTabPartsMixin:
         segmented_layout.setSpacing(8)
 
         active_button = QPushButton(active_route)
-        active_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        active_button.setCursor(Qt.CursorShape.ArrowCursor)
         active_button.setProperty("mockRole", "active")
         active_button.setFixedHeight(20)
         active_button.setMinimumWidth(0)

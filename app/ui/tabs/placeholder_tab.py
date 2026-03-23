@@ -52,7 +52,7 @@ class PlaceholderTab(QWidget):
         for index, action_key in enumerate(self._action_keys):
             button = QPushButton()
             button.clicked.connect(lambda _checked=False, key=action_key: self._emit_action(tr(key)))
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setCursor(Qt.CursorShape.ArrowCursor)
             button.setStyleSheet(button_style("primary" if index == 0 else "secondary"))
             self._buttons.append(button)
             actions_row.addWidget(button)

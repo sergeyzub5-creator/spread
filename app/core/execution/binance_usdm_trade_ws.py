@@ -68,24 +68,52 @@ class BinanceUsdmTradeWebSocketTransport:
         self._time_offset_ms = 0
         self._last_time_sync_at_ms = 0
         self._time_sync_ttl_ms = int(time_sync_ttl_ms)
+        self._last_disconnect_ts_ms = 0
 
     def connect(self) -> bool:
         if websocket is None:
             raise ExecutionTransportError("websocket-client is required for BinanceUsdmTradeWebSocketTransport")
 
+        stale_thread: threading.Thread | None = None
+        stale_ws_app = None
+        should_start_new_thread = True
         with self._lock:
-            if self._thread is not None and self._thread.is_alive() and self._connected:
-                self._logger.info("binance trade ws reuse existing connection")
-                return True
-            self._closing = False
-            self._connected = False
-            self._connect_error = None
-            self._opened_event.clear()
-        self._sync_time_offset()
-        with self._lock:
-            self._thread = threading.Thread(target=self._run_forever, name="binance-usdm-trade-ws", daemon=True)
-            self._thread.start()
-            self._logger.info("binance trade ws starting new connection thread")
+            if self._thread is not None and self._thread.is_alive():
+                if self._connected:
+                    self._logger.info("binance trade ws reuse existing connection")
+                    return True
+                now_ms = int(time.time() * 1000)
+                disconnected_for_ms = now_ms - int(self._last_disconnect_ts_ms or 0)
+                if self._last_disconnect_ts_ms > 0 and disconnected_for_ms >= 1000:
+                    self._logger.warning(
+                        "binance trade ws hard reconnect | disconnected_for_ms=%s",
+                        disconnected_for_ms,
+                    )
+                    self._closing = True
+                    stale_thread = self._thread
+                    stale_ws_app = self._ws_app
+                else:
+                    self._logger.info("binance trade ws waiting for active connection attempt")
+                    should_start_new_thread = False
+            if should_start_new_thread:
+                self._closing = False
+                self._connected = False
+                self._connect_error = None
+                self._opened_event.clear()
+
+        if stale_ws_app is not None:
+            try:
+                stale_ws_app.close()
+            except Exception:
+                pass
+        if stale_thread is not None and stale_thread is not threading.current_thread():
+            stale_thread.join(timeout=1.0)
+        if should_start_new_thread:
+            self._sync_time_offset()
+            with self._lock:
+                self._thread = threading.Thread(target=self._run_forever, name="binance-usdm-trade-ws", daemon=True)
+                self._thread.start()
+                self._logger.info("binance trade ws starting new connection thread")
 
         if not self._opened_event.wait(timeout=self._connect_timeout_seconds):
             raise ExecutionTransportError("binance trade ws connect timeout")
@@ -269,6 +297,7 @@ class BinanceUsdmTradeWebSocketTransport:
         self._connected = True
         self._session_ready = True
         self._connect_error = None
+        self._last_disconnect_ts_ms = 0
         self._opened_event.set()
         self._logger.info("binance trade ws connected")
 
@@ -295,7 +324,16 @@ class BinanceUsdmTradeWebSocketTransport:
             callback(data)
 
     def _on_error(self, error: Any) -> None:
-        self._logger.error("binance trade ws error: %s", error)
+        error_text = str(error or "").strip()
+        with self._lock:
+            self._connected = False
+            self._last_disconnect_ts_ms = int(time.time() * 1000)
+        if self._closing:
+            self._logger.info("binance trade ws closing | error=%s", error_text)
+        elif error_text == "'NoneType' object has no attribute 'sock'":
+            self._logger.warning("binance trade ws disconnected during socket teardown")
+        else:
+            self._logger.error("binance trade ws error: %s", error)
         if not self._connected and self._connect_error is None:
             self._connect_error = error if isinstance(error, Exception) else ExecutionTransportError(str(error))
             self._opened_event.set()
@@ -305,6 +343,7 @@ class BinanceUsdmTradeWebSocketTransport:
         with self._lock:
             self._connected = False
             self._ws_app = None
+            self._last_disconnect_ts_ms = int(time.time() * 1000)
         self._opened_event.set()
         self._logger.info("binance trade ws closed | code=%s | message=%s", status_code, message)
         if not self._closing:

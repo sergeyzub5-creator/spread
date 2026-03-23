@@ -9,9 +9,12 @@ from app.core.accounts.binance_account_connector import BinanceAccountConnector
 from app.core.accounts.bitget_account_connector import BitgetAccountConnector
 from app.core.accounts.bybit_account_connector import BybitAccountConnector
 from app.core.instruments.binance_spot_loader import BinanceSpotInstrumentLoader
+from app.core.instruments.binance_usdm_delivery_loader import BinanceUsdmDeliveryInstrumentLoader
 from app.core.instruments.binance_usdm_loader import BinanceUsdmInstrumentLoader
 from app.core.instruments.bitget_linear_loader import BitgetLinearInstrumentLoader
 from app.core.instruments.bitget_spot_loader import BitgetSpotInstrumentLoader
+from app.core.instruments.bitget_coin_delivery_loader import BitgetCoinDeliveryInstrumentLoader
+from app.core.instruments.bybit_linear_delivery_loader import BybitLinearDeliveryInstrumentLoader
 from app.core.instruments.bybit_linear_loader import BybitLinearInstrumentLoader
 from app.core.instruments.bybit_spot_loader import BybitSpotInstrumentLoader
 from app.core.instruments.market_cap_ranker import MarketCapRanker
@@ -96,10 +99,13 @@ class UiCoordinatorPartsMixin:
         # Lazily-initialised helpers that will eventually move into CoreApp
         self._binance_spot_loader = BinanceSpotInstrumentLoader()
         self._binance_loader = BinanceUsdmInstrumentLoader()
+        self._binance_delivery_loader = BinanceUsdmDeliveryInstrumentLoader()
         self._bitget_linear_loader = BitgetLinearInstrumentLoader()
         self._bitget_spot_loader = BitgetSpotInstrumentLoader()
         self._bybit_spot_loader = BybitSpotInstrumentLoader()
         self._bybit_linear_loader = BybitLinearInstrumentLoader()
+        self._bybit_delivery_loader = BybitLinearDeliveryInstrumentLoader()
+        self._bitget_coin_delivery_loader = BitgetCoinDeliveryInstrumentLoader()
         self._market_cap_ranker = MarketCapRanker()
         self._binance_account_connector = BinanceAccountConnector()
         self._bitget_account_connector = BitgetAccountConnector()
@@ -110,6 +116,9 @@ class UiCoordinatorPartsMixin:
         self._bitget_spot_loaded = False
         self._bybit_spot_loaded = False
         self._bybit_perp_loaded = False
+        self._binance_delivery_loaded = False
+        self._bybit_delivery_loaded = False
+        self._bitget_coin_delivery_loaded = False
     def available_quote_exchanges(self) -> list[tuple[str, str]]:
         return [("binance", "Binance"), ("bitget", "Bitget"), ("bybit", "Bybit")]
 
@@ -138,10 +147,11 @@ class UiCoordinatorPartsMixin:
         return self.available_account_exchanges()
 
     def list_market_types(self, exchange: str) -> list[tuple[str, str]]:
-        if exchange in {"binance", "bitget", "bybit"}:
+        if exchange in {"binance", "bybit", "bitget"}:
             return [
                 (UiInstrumentType.SPOT.value, UI_INSTRUMENT_TYPE_LABELS[UiInstrumentType.SPOT]),
                 (UiInstrumentType.PERPETUAL.value, UI_INSTRUMENT_TYPE_LABELS[UiInstrumentType.PERPETUAL]),
+                (UiInstrumentType.FUTURES.value, UI_INSTRUMENT_TYPE_LABELS[UiInstrumentType.FUTURES]),
             ]
         return []
 
@@ -196,7 +206,18 @@ class UiCoordinatorPartsMixin:
             if now_ms - _last_emit_ms[0] < _QUOTE_EMIT_INTERVAL_MS:
                 return
             _last_emit_ms[0] = now_ms
-            self.public_quote_received.emit(slot_name, quote.to_dict())
+            try:
+                self.public_quote_received.emit(slot_name, quote.to_dict())
+            except RuntimeError:
+                with self._subscription_lock:
+                    current = self._subscriptions.get(slot_name)
+                    if current is not None and current[1] is _handle_quote:
+                        self._subscriptions.pop(slot_name, None)
+                try:
+                    self.market_data_service.unsubscribe_l1(instrument, _handle_quote)
+                except Exception:
+                    pass
+                raise
 
         with self._subscription_lock:
             self._subscriptions[slot_name] = (instrument, _handle_quote)
@@ -364,7 +385,7 @@ class UiCoordinatorPartsMixin:
                 self.worker_command_failed.emit(worker_id, str(exc))
         self._submit_background(f"dual-exec-worker-start-{worker_id}", _run)
 
-    def start_spread_entry_runtime_async(self, *, worker_id: str, left_exchange: str, left_market_type: str, left_symbol: str, left_api_key: str, left_api_secret: str, left_api_passphrase: str = "", left_account_profile: dict | None = None, right_exchange: str, right_market_type: str, right_symbol: str, right_api_key: str, right_api_secret: str, right_api_passphrase: str = "", right_account_profile: dict | None = None, entry_threshold: str, exit_threshold: str, max_quote_age_ms: str, max_quote_skew_ms: str, max_slippage_pct: str = "0", entry_notional_usdt: str = "0", step_notional_usdt: str = "0", entry_min_step_pct: str = "20", left_qty: str = "0", right_qty: str = "0", strategy_signal_mode: str = "market") -> None:
+    def start_spread_entry_runtime_async(self, *, worker_id: str, left_exchange: str, left_market_type: str, left_symbol: str, left_api_key: str, left_api_secret: str, left_api_passphrase: str = "", left_account_profile: dict | None = None, right_exchange: str, right_market_type: str, right_symbol: str, right_api_key: str, right_api_secret: str, right_api_passphrase: str = "", right_account_profile: dict | None = None, entry_threshold: str, exit_threshold: str, max_quote_age_ms: str, max_quote_skew_ms: str, max_slippage_pct: str = "0", entry_notional_usdt: str = "0", step_notional_usdt: str = "0", entry_min_step_pct: str = "20", left_qty: str = "0", right_qty: str = "0", strategy_signal_mode: str = "market", mid_alarm_enabled: str = "1", mid_alarm_window_sec: str = "60") -> None:
         self._logger.info("ui start spread entry runtime requested | worker_id=%s | left=%s:%s:%s | right=%s:%s:%s | entry_threshold=%s | exit_threshold=%s | max_slippage_pct=%s | entry_notional_usdt=%s | cycle_count=%s | entry_min_step_pct=%s | strategy_signal_mode=%s", worker_id, left_exchange, left_market_type, left_symbol, right_exchange, right_market_type, right_symbol, entry_threshold, exit_threshold, max_slippage_pct, entry_notional_usdt, step_notional_usdt, entry_min_step_pct, strategy_signal_mode)
         def _run() -> None:
             try:
@@ -380,13 +401,16 @@ class UiCoordinatorPartsMixin:
                 normalized_left_qty = normalize_decimal_text(left_qty)
                 normalized_right_qty = normalize_decimal_text(right_qty)
                 target_notional = parse_decimal_text(normalized_entry_notional, default="0")
+                if target_notional < Decimal("10"):
+                    target_notional = Decimal("10")
+                    normalized_entry_notional = "10"
                 cycle_count = max(1, int(parse_decimal_text(normalized_cycle_count_text, default="1")))
                 step_notional = (
                     (target_notional / Decimal(cycle_count)).normalize()
                     if target_notional > Decimal("0")
                     else Decimal("0")
                 )
-                task = WorkerTask(worker_id=worker_id, left_instrument=left_instrument, right_instrument=right_instrument, entry_threshold=parse_decimal_text(normalized_entry_threshold, default="0"), exit_threshold=parse_decimal_text(normalized_exit_threshold, default="0"), target_notional=target_notional, step_notional=step_notional, execution_mode="spread_entry_execution", run_mode="spread_entry_execution", execution_credentials=None, left_execution_credentials=ExchangeCredentials(exchange=str(left_exchange or "").strip().lower(), api_key=str(left_api_key or "").strip(), api_secret=str(left_api_secret or "").strip(), api_passphrase=str(left_api_passphrase or "").strip(), account_profile=dict(left_account_profile or {})), right_execution_credentials=ExchangeCredentials(exchange=str(right_exchange or "").strip().lower(), api_key=str(right_api_key or "").strip(), api_secret=str(right_api_secret or "").strip(), api_passphrase=str(right_api_passphrase or "").strip(), account_profile=dict(right_account_profile or {})), runtime_params={"entry_threshold": normalized_entry_threshold, "exit_threshold": normalized_exit_threshold, "max_quote_age_ms": str(max_quote_age_ms or "0"), "max_quote_skew_ms": str(max_quote_skew_ms or "0"), "max_slippage_pct": normalized_max_slippage_pct, "entry_notional_usdt": normalized_entry_notional, "step_notional_usdt": format(step_notional, "f"), "cycle_count": str(cycle_count), "entry_min_step_pct": format(normalized_entry_min_step_pct, "f"), "left_qty": normalized_left_qty, "right_qty": normalized_right_qty, "left_price_mode": "top_of_book", "right_price_mode": "top_of_book", "strategy_signal_mode": str(strategy_signal_mode or "market").strip().lower()})
+                task = WorkerTask(worker_id=worker_id, left_instrument=left_instrument, right_instrument=right_instrument, entry_threshold=parse_decimal_text(normalized_entry_threshold, default="0"), exit_threshold=parse_decimal_text(normalized_exit_threshold, default="0"), target_notional=target_notional, step_notional=step_notional, execution_mode="spread_entry_execution", run_mode="spread_entry_execution", execution_credentials=None, left_execution_credentials=ExchangeCredentials(exchange=str(left_exchange or "").strip().lower(), api_key=str(left_api_key or "").strip(), api_secret=str(left_api_secret or "").strip(), api_passphrase=str(left_api_passphrase or "").strip(), account_profile=dict(left_account_profile or {})), right_execution_credentials=ExchangeCredentials(exchange=str(right_exchange or "").strip().lower(), api_key=str(right_api_key or "").strip(), api_secret=str(right_api_secret or "").strip(), api_passphrase=str(right_api_passphrase or "").strip(), account_profile=dict(right_account_profile or {})), runtime_params={"entry_threshold": normalized_entry_threshold, "exit_threshold": normalized_exit_threshold, "max_quote_age_ms": str(max_quote_age_ms or "0"), "max_quote_skew_ms": str(max_quote_skew_ms or "0"), "max_slippage_pct": normalized_max_slippage_pct, "entry_notional_usdt": normalized_entry_notional, "step_notional_usdt": format(step_notional, "f"), "cycle_count": str(cycle_count), "entry_min_step_pct": format(normalized_entry_min_step_pct, "f"), "left_qty": normalized_left_qty, "right_qty": normalized_right_qty, "left_price_mode": "top_of_book", "right_price_mode": "top_of_book", "strategy_signal_mode": str(strategy_signal_mode or "market").strip().lower(), "mid_alarm_enabled": str(mid_alarm_enabled or "1").strip(), "mid_alarm_window_sec": str(mid_alarm_window_sec or "60").strip()})
                 self.worker_manager.start_worker(task)
             except Exception as exc:
                 self._logger.error("spread entry worker start failed | worker_id=%s | error=%s", worker_id, exc)
@@ -485,6 +509,7 @@ class UiCoordinatorPartsMixin:
         if exchange in {"binance", "bitget", "bybit"}:
             self._ensure_market_type_loaded(exchange, UiInstrumentType.SPOT.value)
             self._ensure_market_type_loaded(exchange, UiInstrumentType.PERPETUAL.value)
+            self._ensure_market_type_loaded(exchange, UiInstrumentType.FUTURES.value)
             return
         raise ValueError(f"Unsupported exchange: {exchange}")
 
@@ -524,6 +549,12 @@ class UiCoordinatorPartsMixin:
                 return
             if normalized_exchange == "bybit" and normalized_market_type == UiInstrumentType.PERPETUAL.value and self._bybit_perp_loaded:
                 return
+            if normalized_exchange == "binance" and normalized_market_type == UiInstrumentType.FUTURES.value and self._binance_delivery_loaded:
+                return
+            if normalized_exchange == "bybit" and normalized_market_type == UiInstrumentType.FUTURES.value and self._bybit_delivery_loaded:
+                return
+            if normalized_exchange == "bitget" and normalized_market_type == UiInstrumentType.FUTURES.value and self._bitget_coin_delivery_loaded:
+                return
         if normalized_market_type == UiInstrumentType.SPOT.value:
             if normalized_exchange == "binance":
                 spot_instruments = self._binance_spot_loader.load_instruments()
@@ -536,8 +567,9 @@ class UiCoordinatorPartsMixin:
             if normalized_exchange == "bitget":
                 spot_instruments = self._bitget_spot_loader.load_instruments()
                 with self._load_lock:
+                    current = self.instrument_registry.list_by_exchange("bitget")
                     if not self._bitget_spot_loaded:
-                        self.instrument_registry.replace_exchange_instruments("bitget", spot_instruments)
+                        self.instrument_registry.replace_exchange_instruments("bitget", [*current, *spot_instruments])
                         self._bitget_spot_loaded = True
                 return
             if normalized_exchange == "bybit":
@@ -568,9 +600,35 @@ class UiCoordinatorPartsMixin:
             if normalized_exchange == "bybit":
                 perp_instruments = self._bybit_linear_loader.load_instruments()
                 with self._load_lock:
+                    current = self.instrument_registry.list_by_exchange("bybit")
                     if not self._bybit_perp_loaded:
-                        self.instrument_registry.replace_exchange_instruments("bybit", perp_instruments)
+                        self.instrument_registry.replace_exchange_instruments("bybit", [*current, *perp_instruments])
                         self._bybit_perp_loaded = True
+                return
+        if normalized_market_type == UiInstrumentType.FUTURES.value:
+            if normalized_exchange == "binance":
+                delivery_instruments = self._binance_delivery_loader.load_instruments()
+                with self._load_lock:
+                    current = self.instrument_registry.list_by_exchange("binance")
+                    if not self._binance_delivery_loaded:
+                        self.instrument_registry.replace_exchange_instruments("binance", [*current, *delivery_instruments])
+                        self._binance_delivery_loaded = True
+                return
+            if normalized_exchange == "bybit":
+                delivery_instruments = self._bybit_delivery_loader.load_instruments()
+                with self._load_lock:
+                    current = self.instrument_registry.list_by_exchange("bybit")
+                    if not self._bybit_delivery_loaded:
+                        self.instrument_registry.replace_exchange_instruments("bybit", [*current, *delivery_instruments])
+                        self._bybit_delivery_loaded = True
+                return
+            if normalized_exchange == "bitget":
+                delivery_instruments = self._bitget_coin_delivery_loader.load_instruments()
+                with self._load_lock:
+                    current = self.instrument_registry.list_by_exchange("bitget")
+                    if not self._bitget_coin_delivery_loaded:
+                        self.instrument_registry.replace_exchange_instruments("bitget", [*current, *delivery_instruments])
+                        self._bitget_coin_delivery_loaded = True
                 return
         raise ValueError(f"Unsupported market type: {market_type}")
 
@@ -588,6 +646,12 @@ class UiCoordinatorPartsMixin:
             return self._bybit_spot_loaded
         if exchange == "bybit" and market_type == UiInstrumentType.PERPETUAL.value:
             return self._bybit_perp_loaded
+        if exchange == "binance" and market_type == UiInstrumentType.FUTURES.value:
+            return self._binance_delivery_loaded
+        if exchange == "bybit" and market_type == UiInstrumentType.FUTURES.value:
+            return self._bybit_delivery_loaded
+        if exchange == "bitget" and market_type == UiInstrumentType.FUTURES.value:
+            return self._bitget_coin_delivery_loaded
         return False
 
     def _resolve_instrument(self, exchange: str, market_type: str, symbol: str):

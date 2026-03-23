@@ -3,18 +3,18 @@
     "left": {
       "exchange": "bitget",
       "market_type": "perpetual",
-      "symbol": "XRPUSDT"
+      "symbol": "PIPPINUSDT"
     },
     "right": {
-      "exchange": "binance",
+      "exchange": "bybit",
       "market_type": "perpetual",
-      "symbol": "XRPUSDT"
+      "symbol": "PIPPINUSDT"
     }
   },
   "spread_strategy": {
-    "spread.entry_threshold": "0,3",
-    "spread.exit_threshold": "0,01",
-    "spread.target_size": "30",
+    "spread.entry_threshold": "1.8",
+    "spread.exit_threshold": "0.1",
+    "spread.target_size": "10",
     "spread.entry_min_step_pct": "20"
   }
 }

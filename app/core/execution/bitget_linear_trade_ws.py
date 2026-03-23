@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import random
 import threading
 import time
 import uuid
@@ -60,6 +61,11 @@ class BitgetLinearTradeWebSocketTransport:
         self._opened_event = threading.Event()
         self._auth_event = threading.Event()
         self._connect_error: Exception | None = None
+        self._session_ready = False
+        self._reconnect_attempts_total = 0
+        self._last_disconnect_code: str | None = None
+        self._last_disconnect_message: str | None = None
+        self._last_error_text: str | None = None
         self._last_ping_ts_ms = 0
         self._last_pong_ts_ms = 0
         self._ping_fail_count = 0
@@ -190,20 +196,40 @@ class BitgetLinearTradeWebSocketTransport:
         return pending.response
 
     def _run_forever(self) -> None:
-        self._ws_app = websocket.WebSocketApp(
-            self.WS_URL,
-            on_open=lambda ws: self._on_open(),
-            on_message=lambda ws, message: self._on_message(message),
-            on_error=lambda ws, error: self._on_error(error),
-            on_close=lambda ws, code, message: self._on_close(code, message),
-        )
-        try:
-            self._ws_app.run_forever()
-        except Exception as exc:  # pragma: no cover
-            self._connect_error = exc
-            self._opened_event.set()
-            self._auth_event.set()
-            self._logger.error("bitget trade ws loop crashed: %s", exc)
+        backoff_seconds = 1.0
+        while not self._closing:
+            with self._lock:
+                self._opened_event.clear()
+                self._auth_event.clear()
+                self._session_ready = False
+                self._ws_app = websocket.WebSocketApp(
+                    self.WS_URL,
+                    on_open=lambda ws: self._on_open(),
+                    on_message=lambda ws, message: self._on_message(message),
+                    on_error=lambda ws, error: self._on_error(error),
+                    on_close=lambda ws, code, message: self._on_close(code, message),
+                )
+            try:
+                self._ws_app.run_forever()
+            except Exception as exc:  # pragma: no cover
+                self._connect_error = exc
+                self._opened_event.set()
+                self._auth_event.set()
+                self._logger.error("bitget trade ws loop crashed: %s", exc)
+            finally:
+                with self._lock:
+                    self._ws_app = None
+            if self._closing:
+                break
+            delay = min(backoff_seconds, 15.0)
+            jitter = random.uniform(0.0, delay * 0.3)
+            self._reconnect_attempts_total += 1
+            self._logger.warning("bitget trade ws reconnect scheduled | delay_seconds=%.2f", delay + jitter)
+            time.sleep(delay + jitter)
+            if self._session_ready:
+                backoff_seconds = 1.0
+            else:
+                backoff_seconds = min(backoff_seconds * 2.0, 15.0)
 
     def _ping_loop(self) -> None:
         while not self._closing:
@@ -215,7 +241,14 @@ class BitgetLinearTradeWebSocketTransport:
                 self._send_raw("ping")
             except Exception:
                 self._ping_fail_count += 1
-                return
+                with self._lock:
+                    self._connected = False
+                    ws_app = self._ws_app
+                if ws_app is not None:
+                    try:
+                        ws_app.close()
+                    except Exception:
+                        pass
 
     def _on_open(self) -> None:
         self._connected = True
@@ -237,6 +270,7 @@ class BitgetLinearTradeWebSocketTransport:
             code = str(payload.get("code", "")).strip()
             if code == "0":
                 self._authenticated = True
+                self._session_ready = True
                 self._auth_event.set()
                 self._logger.info("bitget trade ws authenticated")
             else:
@@ -293,6 +327,7 @@ class BitgetLinearTradeWebSocketTransport:
             callback(payload)
 
     def _on_error(self, error: Any) -> None:
+        self._last_error_text = str(error)
         self._logger.error("bitget trade ws error: %s", error)
         if not self._connected and self._connect_error is None:
             self._connect_error = error if isinstance(error, Exception) else BitgetTradeWebSocketError(str(error))
@@ -303,6 +338,8 @@ class BitgetLinearTradeWebSocketTransport:
     def _on_close(self, code: Any, message: Any) -> None:
         self._connected = False
         self._authenticated = False
+        self._last_disconnect_code = str(code) if code is not None else None
+        self._last_disconnect_message = str(message) if message is not None else None
         self._opened_event.set()
         self._auth_event.set()
         with self._lock:
@@ -361,6 +398,10 @@ class BitgetLinearTradeWebSocketTransport:
                 "authenticated": self._authenticated,
                 "closing": self._closing,
                 "pending_requests": len(self._pending),
+                "reconnect_attempts_total": self._reconnect_attempts_total,
+                "last_disconnect_code": self._last_disconnect_code,
+                "last_disconnect_message": self._last_disconnect_message,
+                "last_error_text": self._last_error_text,
                 "last_ping_ts_ms": self._last_ping_ts_ms or None,
                 "last_pong_ts_ms": self._last_pong_ts_ms or None,
                 "ping_fail_count": self._ping_fail_count,

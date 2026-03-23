@@ -90,6 +90,8 @@ class WorkerRuntimeSizingMixin:
         right_snapshot = self.market_data_service.get_depth20_snapshot(self._right_instrument)
         if left_snapshot is None or right_snapshot is None:
             return left_qty, right_qty
+        left_quote = self._latest_quotes.get(self._left_instrument)
+        right_quote = self._latest_quotes.get(self._right_instrument)
         slippage_pct = self._entry_max_slippage_pct()
         left_available = self._depth20_available_qty_for_action(
             instrument=self._left_instrument,
@@ -120,6 +122,33 @@ class WorkerRuntimeSizingMixin:
             limited_common_qty = Decimal("0")
         if limited_common_qty >= requested_common_qty:
             return left_qty, right_qty
+        left_best_bid = left_snapshot.bids[0].price if left_snapshot.bids else None
+        left_best_ask = left_snapshot.asks[0].price if left_snapshot.asks else None
+        right_best_bid = right_snapshot.bids[0].price if right_snapshot.bids else None
+        right_best_ask = right_snapshot.asks[0].price if right_snapshot.asks else None
+        signature = (
+            str(edge_result.left_action or ""),
+            str(edge_result.right_action or ""),
+            self._format_order_size(requested_common_qty),
+            self._format_order_size(left_available),
+            self._format_order_size(right_available),
+            self._format_order_size(left_best_bid),
+            self._format_order_size(left_best_ask),
+            self._format_order_size(right_best_bid),
+            self._format_order_size(right_best_ask),
+            self._format_order_size(left_quote.bid if left_quote is not None else None),
+            self._format_order_size(left_quote.ask if left_quote is not None else None),
+            self._format_order_size(right_quote.bid if right_quote is not None else None),
+            self._format_order_size(right_quote.ask if right_quote is not None else None),
+        )
+        now_ms = int(time.time() * 1000)
+        should_emit = (
+            signature != getattr(self, "_last_depth20_clamp_signature", None)
+            or (now_ms - int(getattr(self, "_last_depth20_clamp_at_ms", 0) or 0)) >= 2000
+        )
+        if should_emit:
+            self._last_depth20_clamp_signature = signature
+            self._last_depth20_clamp_at_ms = now_ms
         self.logger.info(
             "entry depth20 liquidity clamp | requested_qty=%s | left_available_qty=%s | right_available_qty=%s | left_safe_qty=%s | right_safe_qty=%s | limited_qty=%s | slippage_pct=%s | depth_buffer_pct=%s",
             self._format_order_size(requested_common_qty),
@@ -131,6 +160,34 @@ class WorkerRuntimeSizingMixin:
             self._format_order_size(slippage_pct),
             self._format_order_size(buffer_pct),
         )
+        if should_emit:
+            self.emit_event(
+                "entry_depth20_liquidity_clamp",
+                {
+                    "requested_qty": self._format_order_size(requested_common_qty),
+                    "left_action": str(edge_result.left_action or ""),
+                    "right_action": str(edge_result.right_action or ""),
+                    "left_available_qty": self._format_order_size(left_available),
+                    "right_available_qty": self._format_order_size(right_available),
+                    "left_safe_qty": self._format_order_size(left_safe_available),
+                    "right_safe_qty": self._format_order_size(right_safe_available),
+                    "limited_qty": self._format_order_size(limited_common_qty),
+                    "slippage_pct": self._format_order_size(slippage_pct),
+                    "depth_buffer_pct": self._format_order_size(buffer_pct),
+                    "left_symbol": self._left_instrument.symbol,
+                    "right_symbol": self._right_instrument.symbol,
+                    "left_quote_bid": self._format_order_size(left_quote.bid if left_quote is not None else None),
+                    "left_quote_ask": self._format_order_size(left_quote.ask if left_quote is not None else None),
+                    "right_quote_bid": self._format_order_size(right_quote.bid if right_quote is not None else None),
+                    "right_quote_ask": self._format_order_size(right_quote.ask if right_quote is not None else None),
+                    "left_depth_best_bid": self._format_order_size(left_best_bid),
+                    "left_depth_best_ask": self._format_order_size(left_best_ask),
+                    "right_depth_best_bid": self._format_order_size(right_best_bid),
+                    "right_depth_best_ask": self._format_order_size(right_best_ask),
+                    "left_depth_ts_local": left_snapshot.ts_local,
+                    "right_depth_ts_local": right_snapshot.ts_local,
+                },
+            )
         return limited_common_qty, limited_common_qty
 
     def _depth20_available_qty_for_action(

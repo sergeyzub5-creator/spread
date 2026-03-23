@@ -13,3 +13,4 @@ data/exchanges.json
 app/data/ui_state.json
 app/data/exchanges.json
 app/data/credentials.secure.json
+app/data/scanner_settings.json

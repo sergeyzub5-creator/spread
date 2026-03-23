@@ -64,6 +64,24 @@ def build_entry_decision(runtime: WorkerRuntime) -> EntryDecision | None:
         allowed_states.add(StrategyState.ENTRY_SUBMITTING)
     if runtime.strategy_state not in allowed_states:
         return None
+    startup_block_reason = runtime._startup_entry_gate_block_reason()
+    forced_signal_pending = bool(getattr(runtime, "_forced_entry_signal_requested", False))
+    if startup_block_reason is not None:
+        threshold = runtime._decimal_or_zero(runtime.task.runtime_params.get("entry_threshold") or runtime.task.entry_threshold)
+        raw_edge_result = calculate_spread_edges(runtime._latest_quotes.get(runtime._left_instrument), runtime._latest_quotes.get(runtime._right_instrument))
+        decision = runtime._make_entry_decision(
+            edge_result=raw_edge_result,
+            threshold=threshold,
+            validation_result=None,
+            block_reason=startup_block_reason,
+            forced_signal=forced_signal_pending,
+            is_executable=False,
+        )
+        runtime.state.metrics["entry_block_reason"] = startup_block_reason
+        logged = runtime._log_entry_decision(decision=decision)
+        runtime._log_entry_blocked(startup_block_reason, decision_logged=logged)
+        runtime._publish_state()
+        return decision
     forced_signal = runtime._take_forced_entry_signal()
     now_ms = int(time.time() * 1000)
     threshold = runtime._decimal_or_zero(runtime.task.runtime_params.get("entry_threshold") or runtime.task.entry_threshold)
@@ -101,6 +119,26 @@ def build_entry_decision(runtime: WorkerRuntime) -> EntryDecision | None:
         return decision
     if runtime.strategy_state is StrategyState.COOLDOWN:
         runtime._set_strategy_state(StrategyState.IDLE)
+    # Mid-alarm: entry evaluation only while armed window (|mid| already touched threshold).
+    if (
+        runtime.position is None
+        and getattr(runtime, "_mid_alarm_enabled", False)
+        and not forced_signal
+        and not runtime._mid_alarm_entry_allowed()
+    ):
+        decision = runtime._make_entry_decision(
+            edge_result=simulated_locked_edge_result or raw_edge_result,
+            threshold=threshold,
+            validation_result=None,
+            block_reason="MID_ALARM_DISARMED",
+            forced_signal=False,
+            is_executable=False,
+        )
+        runtime.state.metrics["entry_block_reason"] = "MID_ALARM_DISARMED"
+        logged = runtime._log_entry_decision(decision=decision)
+        runtime._log_entry_blocked("MID_ALARM_DISARMED", decision_logged=logged)
+        runtime._publish_state()
+        return decision
     pipeline_block_reason = runtime._entry_pipeline_busy_reason()
     if pipeline_block_reason is not None:
         decision = runtime._make_entry_decision(
@@ -245,7 +283,6 @@ def build_entry_decision(runtime: WorkerRuntime) -> EntryDecision | None:
         runtime.state.metrics["entry_block_reason"] = validation_result.block_reason
         logged = runtime._log_entry_decision(decision=decision)
         runtime._log_entry_blocked(str(validation_result.block_reason), decision_logged=logged)
-        runtime.emit_event("entry_blocked", {"reason": validation_result.block_reason, "validation": validation_result.to_dict()})
         runtime._publish_state()
         return decision
     runtime.state.metrics["active_edge"] = decision.edge_name

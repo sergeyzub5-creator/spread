@@ -93,6 +93,31 @@ def evaluate_spread_exit(runtime: WorkerRuntime) -> None:
 EXIT_ZERO_CONVERGENCE_EPSILON = Decimal("0.0000001")
 
 
+def _signed_exit_trigger(
+    runtime: WorkerRuntime,
+    *,
+    exit_threshold: Decimal,
+    left_quote: Any,
+    right_quote: Any,
+) -> bool | None:
+    entry_signed = getattr(runtime.position, "entry_edge", None) if runtime.position is not None else None
+    active_edge = getattr(runtime.position, "active_edge", None) if runtime.position is not None else None
+    if entry_signed is None or left_quote is None or right_quote is None or not active_edge:
+        return None
+    edge_result = calculate_spread_edges(left_quote, right_quote)
+    leg = _normalize_edge_name(active_edge)
+    current_signed = edge_result.edge_1 if leg == "EDGE_1" else edge_result.edge_2 if leg == "EDGE_2" else None
+    if current_signed is None:
+        return None
+    boundary = _exit_boundary_signed(entry_signed, exit_threshold)
+    if entry_signed < Decimal("0"):
+        return bool(boundary is not None and current_signed > boundary)
+    if entry_signed > Decimal("0"):
+        return bool(boundary is not None and current_signed < boundary)
+    epsilon = exit_threshold if exit_threshold > Decimal("0") else EXIT_ZERO_CONVERGENCE_EPSILON
+    return bool(abs(current_signed) <= epsilon)
+
+
 def build_exit_decision(runtime: WorkerRuntime) -> dict[str, Any] | None:
     if not _has_open_exposure(runtime):
         return None
@@ -109,37 +134,18 @@ def build_exit_decision(runtime: WorkerRuntime) -> dict[str, Any] | None:
         return None
 
     allow_exit = False
-    entry_signed = getattr(runtime.position, "entry_edge", None) if runtime.position is not None else None
     left_quote = runtime._latest_quotes.get(runtime._left_instrument)
     right_quote = runtime._latest_quotes.get(runtime._right_instrument)
+    signed_trigger = _signed_exit_trigger(
+        runtime,
+        exit_threshold=exit_threshold,
+        left_quote=left_quote,
+        right_quote=right_quote,
+    )
 
-    # Ось по знаку: при входе сохранён знаковый спред по ноге (edge_1/edge_2).
-    # Порог выхода — граница на той же оси (в долях; в % можно задать со знаком или по модулю).
-    # Пример: вход при -1, порог -0.2 → выход при current > -0.2 (-0.1, 0, +0.1, +2 — всё правее).
-    # Симметрично для входа при +1 и пороге +0.2 → выход при current < +0.2.
-    if (
-        entry_signed is not None
-        and left_quote is not None
-        and right_quote is not None
-        and getattr(runtime.position, "active_edge", None)
-    ):
-        edge_result = calculate_spread_edges(left_quote, right_quote)
-        leg = _normalize_edge_name(getattr(runtime.position, "active_edge", None))
-        current_signed = edge_result.edge_1 if leg == "EDGE_1" else edge_result.edge_2 if leg == "EDGE_2" else None
-        if current_signed is not None:
-            boundary = _exit_boundary_signed(entry_signed, exit_threshold)
-            if entry_signed < Decimal("0"):
-                # Ушли вправо от границы (к нулю и дальше) — триггер
-                if boundary is not None and current_signed > boundary:
-                    allow_exit = True
-            elif entry_signed > Decimal("0"):
-                if boundary is not None and current_signed < boundary:
-                    allow_exit = True
-            else:
-                if abs(current_signed) <= (exit_threshold if exit_threshold > Decimal("0") else EXIT_ZERO_CONVERGENCE_EPSILON):
-                    allow_exit = True
-
-    if not allow_exit and not exit_cycle_in_flight:
+    if signed_trigger is not None:
+        allow_exit = signed_trigger
+    elif not exit_cycle_in_flight:
         # Fallback: схождение по пути закрытия, если нет знакового входа
         effective_exit_ceiling = (
             exit_threshold if exit_threshold > Decimal("0") else EXIT_ZERO_CONVERGENCE_EPSILON
@@ -207,35 +213,23 @@ def _normalize_edge_name(active_edge: object) -> str | None:
 
 
 def exit_trigger_converged_or_flipped(runtime: WorkerRuntime) -> bool:
-    """Выход по оси со знаком (entry_edge + порог) или fallback схождение/переворот."""
+    """Exit follows signed entry axis; fallback convergence/flip applies only without signed context."""
     exit_threshold = runtime._decimal_or_zero(runtime.task.exit_threshold or runtime.task.runtime_params.get("exit_threshold"))
     exit_edge = runtime._current_exit_edge()
     if exit_edge is None:
         return False
-    entry_signed = getattr(runtime.position, "entry_edge", None) if runtime.position is not None else None
     left_quote = right_quote = None
     if hasattr(runtime, "_latest_quotes"):
         left_quote = runtime._latest_quotes.get(runtime._left_instrument)  # type: ignore[attr-defined]
         right_quote = runtime._latest_quotes.get(runtime._right_instrument)  # type: ignore[attr-defined]
-    if (
-        entry_signed is not None
-        and left_quote is not None
-        and right_quote is not None
-        and getattr(runtime.position, "active_edge", None)
-    ):
-        edge_result = calculate_spread_edges(left_quote, right_quote)
-        leg = _normalize_edge_name(getattr(runtime.position, "active_edge", None))
-        current_signed = edge_result.edge_1 if leg == "EDGE_1" else edge_result.edge_2 if leg == "EDGE_2" else None
-        if current_signed is not None:
-            boundary = _exit_boundary_signed(entry_signed, exit_threshold)
-            if entry_signed < Decimal("0") and boundary is not None and current_signed > boundary:
-                return True
-            if entry_signed > Decimal("0") and boundary is not None and current_signed < boundary:
-                return True
-            if entry_signed == Decimal("0"):
-                eps = exit_threshold if exit_threshold > Decimal("0") else EXIT_ZERO_CONVERGENCE_EPSILON
-                if abs(current_signed) <= eps:
-                    return True
+    signed_trigger = _signed_exit_trigger(
+        runtime,
+        exit_threshold=exit_threshold,
+        left_quote=left_quote,
+        right_quote=right_quote,
+    )
+    if signed_trigger is not None:
+        return signed_trigger
     effective_exit_ceiling = (
         exit_threshold if exit_threshold > Decimal("0") else EXIT_ZERO_CONVERGENCE_EPSILON
     )

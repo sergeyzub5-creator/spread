@@ -81,9 +81,13 @@ class UiCoordinator(UiCoordinatorPartsMixin, QObject):
 
         self.market_data_service.register_exchange_transport("binance:spot", BinanceSpotPublicConnector(), BinanceSpotQuoteNormalizer())
         self.market_data_service.register_exchange_transport("binance:linear_perp", BinanceUsdmPublicConnector(), BinanceUsdmQuoteNormalizer())
+        # Срочные USD-M — тот же fstream/bookTicker
+        self.market_data_service.register_exchange_transport("binance:linear_delivery", BinanceUsdmPublicConnector(), BinanceUsdmQuoteNormalizer())
         self.market_data_service.register_exchange_transport("bitget:spot", BitgetSpotPublicConnector(), BitgetSpotQuoteNormalizer())
         self.market_data_service.register_exchange_transport("bitget:linear_perp", BitgetLinearPublicConnector(), BitgetLinearQuoteNormalizer())
+        self.market_data_service.register_exchange_transport("bitget:bitget_coin_delivery", BitgetLinearPublicConnector(), BitgetLinearQuoteNormalizer())
         self.market_data_service.register_exchange_transport("bybit:linear_perp", BybitLinearPublicConnector(), BybitLinearQuoteNormalizer())
+        self.market_data_service.register_exchange_transport("bybit:linear_delivery", BybitLinearPublicConnector(), BybitLinearQuoteNormalizer())
         self.market_data_service.register_exchange_transport("bybit:spot", BybitSpotPublicConnector(), BybitSpotQuoteNormalizer())
 
     def _submit_background(self, task_name: str, fn) -> None:

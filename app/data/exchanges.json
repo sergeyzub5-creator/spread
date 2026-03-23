@@ -1,37 +1,6 @@
 {
   "cards": [
     {
-      "exchange_code": "binance",
-      "exchange_title": "Binance Futures",
-      "exchange_name": "Binance",
-      "testnet": false,
-      "account_snapshot": {
-        "exchange": "binance",
-        "status_text": "Подключено · Spot + Futures",
-        "balance_text": "Баланс: 7.46 USDT",
-        "positions_text": "Позиции: <span style='color:#ef4444;'>1 шорт</span>",
-        "pnl_text": "PnL: <span style='color:#ef4444;'>-0.14 USDT</span>",
-        "spot_enabled": true,
-        "futures_enabled": true,
-        "can_trade": true,
-        "account_profile": {
-          "account_type": "separate_spot_and_usdm",
-          "account_mode": "classic",
-          "supports_spot": true,
-          "supports_futures": true,
-          "preferred_execution_route": "binance_usdm_trade_ws",
-          "detected_via": [
-            "spot_account",
-            "futures_account"
-          ]
-        }
-      },
-      "connected": true,
-      "credential_ref": "22923104fc4046d1b49391ae9a8e799e",
-      "credentials_stored": true,
-      "api_key_masked": "WynX...utZP"
-    },
-    {
       "exchange_code": "bitget",
       "exchange_title": "Bitget Futures",
       "exchange_name": "Bitget",
@@ -39,9 +8,9 @@
       "account_snapshot": {
         "exchange": "bitget",
         "status_text": "Подключено · Spot + Futures",
-        "balance_text": "Баланс: 8.10 USDT",
+        "balance_text": "Баланс: 11.36 USDT",
         "positions_text": "Позиции: <span style='color:#22c55e;'>1 лонг</span>",
-        "pnl_text": "PnL: <span style='color:#22c55e;'>0.11 USDT</span>",
+        "pnl_text": "PnL: <span style='color:#ef4444;'>-0.87 USDT</span>",
         "spot_enabled": true,
         "futures_enabled": true,
         "can_trade": true,
@@ -66,6 +35,69 @@
       "credential_ref": "4c6de51e1e2f475f8bfc3951dac577e2",
       "credentials_stored": true,
       "api_key_masked": "bg_f...a533"
+    },
+    {
+      "exchange_code": "bybit",
+      "exchange_title": "Bybit Futures",
+      "exchange_name": "Bybit",
+      "testnet": false,
+      "account_snapshot": {
+        "exchange": "bybit",
+        "status_text": "Подключено · Futures",
+        "balance_text": "Баланс: 9.12 USD",
+        "positions_text": "Позиции: <span style='color:#ef4444;'>1 шорт</span>",
+        "pnl_text": "PnL: <span style='color:#22c55e;'>1.42 USD</span>",
+        "spot_enabled": false,
+        "futures_enabled": true,
+        "can_trade": true,
+        "account_profile": {
+          "account_type": "unified",
+          "account_mode": "uta",
+          "supports_spot": false,
+          "supports_futures": true,
+          "preferred_execution_route": "bybit_linear_trade_ws",
+          "detected_via": [
+            "v5_wallet_balance",
+            "v5_position_list"
+          ]
+        }
+      },
+      "connected": true,
+      "credential_ref": "760a2b44a5d34599bea097254db6ca13",
+      "credentials_stored": true,
+      "api_key_masked": "Wlkg...vb46"
+    },
+    {
+      "exchange_code": "binance",
+      "exchange_title": "Binance Futures",
+      "exchange_name": "Binance",
+      "testnet": false,
+      "account_snapshot": {
+        "exchange": "binance",
+        "status_text": "Подключено · Spot + Futures · Portfolio Margin",
+        "balance_text": "Баланс: 8.25 USD",
+        "positions_text": "Позиции: 0",
+        "pnl_text": "PnL: 0.00 USDT",
+        "spot_enabled": true,
+        "futures_enabled": true,
+        "can_trade": true,
+        "account_profile": {
+          "account_type": "portfolio_margin",
+          "account_mode": "portfolio_margin",
+          "supports_spot": true,
+          "supports_futures": true,
+          "preferred_execution_route": "binance_usdm_trade_ws",
+          "detected_via": [
+            "spot_account",
+            "papi_account",
+            "papi_um_account"
+          ]
+        }
+      },
+      "connected": true,
+      "credential_ref": "331819cefdb64eb4af4c122633c5672f",
+      "credentials_stored": true,
+      "api_key_masked": "jBdr...OSWc"
     }
   ]
 }

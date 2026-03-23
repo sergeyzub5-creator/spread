@@ -32,8 +32,7 @@ def maybe_restore_in_position_state(runtime: WorkerRuntime) -> bool:
         return False
     if not runtime._position_is_hedged():
         return False
-    if runtime._entry_growth_limit_pending and not runtime._entry_growth_limited:
-        runtime._set_entry_growth_limited(reason=runtime._entry_growth_limit_pending_reason or "MARGIN_LIMIT_REACHED")
+    runtime._rebind_restored_position_to_current_task(reason="HEDGED_POSITION_RESTORED")
     runtime._sync_position_from_legs()
     runtime._settle_dual_execution_state(reason="HEDGED_POSITION_RESTORED")
     if runtime.strategy_state is not StrategyState.IN_POSITION:

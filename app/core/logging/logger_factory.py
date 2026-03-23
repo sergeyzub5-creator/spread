@@ -15,31 +15,70 @@ class _WorkerIdFilter(logging.Filter):
         return True
 
 
+class _ScannerLogFilter(logging.Filter):
+    _PREFIXES = (
+        "scanner.",
+        "ui.spot_futures_scanner",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        name = str(getattr(record, "name", "") or "")
+        return any(name.startswith(prefix) for prefix in self._PREFIXES)
+
+
+class _ScannerV2LogFilter(logging.Filter):
+    _PREFIXES = (
+        "scanner.v2.",
+        "ui.scanner_v2",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        name = str(getattr(record, "name", "") or "")
+        return any(name.startswith(prefix) for prefix in self._PREFIXES)
+
+
 _CONFIGURED = False
 _LOG_DIR = Path(__file__).resolve().parents[3] / "logs"
-
-# По умолчанию: один файл session_trace.log — только события (JSONL, как раньше один лог, но без простыни INFO).
-# Полный лог всех logger'ов — опционально в session_trace_full.log.
 _SESSION_TRACE_PATH = _LOG_DIR / "session_trace.log"
-_FULL_LOG_PATH = _LOG_DIR / "session_trace_full.log"
+_EVENTS_LOG_PATH = _LOG_DIR / "runtime_events.log"
+_SCANNER_LOG_PATH = _LOG_DIR / "scanner_trace.log"
+_SCANNER_V2_LOG_PATH = _LOG_DIR / "scanner_v2_trace.log"
 
-# Полный INFO в файл (всё как раньше простынёй) — только если SPREAD_SNIPER_FULL_SESSION_LOG=1
-_FULL_SESSION_LOG_ENABLED = os.environ.get("SPREAD_SNIPER_FULL_SESSION_LOG", "0").strip().lower() in ("1", "true", "yes", "on")
+# session_trace.log — основной подробный текстовый лог по умолчанию.
+# Отключается только явно: SPREAD_SNIPER_SESSION_TRACE_LOG=0
+_SESSION_TRACE_LOG_ENABLED = os.environ.get("SPREAD_SNIPER_SESSION_TRACE_LOG", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
 
-# Запись событий emit_event в session_trace.log — по умолчанию да; выключить: SPREAD_SNIPER_EVENTS_LOG=0
-_EVENTS_LOG_ENABLED = os.environ.get("SPREAD_SNIPER_EVENTS_LOG", "1").strip().lower() not in ("0", "false", "no", "off")
+# runtime_events.log — отдельный JSONL-журнал событий emit_event.
+_EVENTS_LOG_ENABLED = os.environ.get("SPREAD_SNIPER_EVENTS_LOG", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+_SCANNER_LOG_ENABLED = os.environ.get("SPREAD_SNIPER_SCANNER_LOG", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+_SCANNER_V2_LOG_ENABLED = os.environ.get("SPREAD_SNIPER_SCANNER_V2_LOG", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
 
-# По умолчанию в лог попадают только строки, по которым удобно строить отчёт за часы работы.
-# Исключаем: тики котировок; дубликаты (sent/ack/fill под другим именем); потоковые order_event с сырым raw;
-# rest_poll_*; тяжёлый execution_stream_health_updated (оставляем только warning при деградации — отдельное событие).
-# Включить ВСЁ как раньше: SPREAD_SNIPER_EVENTS_LOG_ALL=1
 _DEFAULT_SKIP_EVENT_TYPES = frozenset(
     {
         "left_quote_update",
         "right_quote_update",
         "spread_update",
         "quote_received",
-        # Дубликаты имён (то же самое уже в *_order_ack / *_order_filled / entry_started)
         "left_order_sent",
         "right_order_sent",
         "entry_left_sent",
@@ -48,27 +87,24 @@ _DEFAULT_SKIP_EVENT_TYPES = frozenset(
         "entry_right_ack",
         "entry_left_fill",
         "entry_right_fill",
-        # Один поток WS/REST — десятки строк на один fill; для отчёта достаточно ack + filled + done
         "left_order_event",
         "right_order_event",
         "entry_left_event",
         "entry_right_event",
-        # Шум опроса
         "rest_poll_started",
         "rest_poll_stopped",
-        # Дублирует dual_exec_started / entry_started
         "dual_exec_attempts_bound",
         "entry_attempts_bound",
-        # Каждый раз огромный payload streams; при сбое будет execution_stream_health_warning
-        "execution_stream_health_updated",
     }
 )
 _EVENTS_LOG_ALL = os.environ.get("SPREAD_SNIPER_EVENTS_LOG_ALL", "0").strip().lower() in ("1", "true", "yes", "on")
+_EVENTS_LOG_COMPACT = os.environ.get("SPREAD_SNIPER_EVENTS_LOG_COMPACT", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
 
-# Ужать payload: выкинуть raw (биржевой ответ) и пустые поля — строка короче, отчёт читабельнее.
-_EVENTS_LOG_COMPACT = os.environ.get("SPREAD_SNIPER_EVENTS_LOG_COMPACT", "1").strip().lower() not in ("0", "false", "no", "off")
-
-# Дополнительно: через запятую подстроки event_type, которые не писать
 _EVENTS_LOG_EXCLUDE: set[str] = set()
 for _part in os.environ.get("SPREAD_SNIPER_EVENTS_LOG_EXCLUDE", "").split(","):
     _p = _part.strip()
@@ -83,27 +119,47 @@ def _configure_root_logging() -> None:
     if _CONFIGURED:
         return
 
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.ERROR)
-    handler.addFilter(_WorkerIdFilter())
-    handler.setFormatter(
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.ERROR)
+    console_handler.addFilter(_WorkerIdFilter())
+    console_handler.setFormatter(
         logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | worker_id=%(worker_id)s | %(message)s")
     )
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
     root_logger.handlers.clear()
-    root_logger.addHandler(handler)
+    root_logger.addHandler(console_handler)
 
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    if _FULL_SESSION_LOG_ENABLED:
-        file_handler = logging.FileHandler(_FULL_LOG_PATH, mode="a", encoding="utf-8")
+    if _SESSION_TRACE_LOG_ENABLED:
+        file_handler = logging.FileHandler(_SESSION_TRACE_PATH, mode="a", encoding="utf-8")
         file_handler.setLevel(logging.INFO)
         file_handler.addFilter(_WorkerIdFilter())
         file_handler.setFormatter(
             logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | worker_id=%(worker_id)s | %(message)s")
         )
         root_logger.addHandler(file_handler)
+
+    if _SCANNER_LOG_ENABLED:
+        scanner_handler = logging.FileHandler(_SCANNER_LOG_PATH, mode="a", encoding="utf-8")
+        scanner_handler.setLevel(logging.INFO)
+        scanner_handler.addFilter(_WorkerIdFilter())
+        scanner_handler.addFilter(_ScannerLogFilter())
+        scanner_handler.setFormatter(
+            logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | worker_id=%(worker_id)s | %(message)s")
+        )
+        root_logger.addHandler(scanner_handler)
+
+    if _SCANNER_V2_LOG_ENABLED:
+        scanner_v2_handler = logging.FileHandler(_SCANNER_V2_LOG_PATH, mode="a", encoding="utf-8")
+        scanner_v2_handler.setLevel(logging.INFO)
+        scanner_v2_handler.addFilter(_WorkerIdFilter())
+        scanner_v2_handler.addFilter(_ScannerV2LogFilter())
+        scanner_v2_handler.setFormatter(
+            logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | worker_id=%(worker_id)s | %(message)s")
+        )
+        root_logger.addHandler(scanner_v2_handler)
 
     _CONFIGURED = True
 
@@ -115,10 +171,7 @@ def get_logger(name: str, worker_id: str | None = None) -> logging.LoggerAdapter
 
 
 def reset_session_trace_log() -> Path:
-    """
-    Обнуляет session_trace.log (события JSONL) при каждом запуске.
-    Если включён полный лог — обнуляет session_trace_full.log.
-    """
+    """Сбрасывает основной подробный лог и, если включено, JSONL-журнал событий."""
     global _CONFIGURED
     root_logger = logging.getLogger()
     for handler in list(root_logger.handlers):
@@ -129,44 +182,48 @@ def reset_session_trace_log() -> Path:
             pass
     root_logger.handlers.clear()
     _CONFIGURED = False
+
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    if _FULL_SESSION_LOG_ENABLED:
-        for rotated_path in _LOG_DIR.glob(f"{_FULL_LOG_PATH.name}.*"):
-            try:
-                rotated_path.unlink()
-            except Exception:
-                pass
-        _FULL_LOG_PATH.write_text("", encoding="utf-8")
     _SESSION_TRACE_PATH.write_text("", encoding="utf-8")
-    # Маркер формата — удобно при разборе для отчёта
+    if _SCANNER_LOG_ENABLED:
+        _SCANNER_LOG_PATH.write_text("", encoding="utf-8")
+    elif _SCANNER_LOG_PATH.exists():
+        _SCANNER_LOG_PATH.write_text("", encoding="utf-8")
+    if _SCANNER_V2_LOG_ENABLED:
+        _SCANNER_V2_LOG_PATH.write_text("", encoding="utf-8")
+    elif _SCANNER_V2_LOG_PATH.exists():
+        _SCANNER_V2_LOG_PATH.write_text("", encoding="utf-8")
     if _EVENTS_LOG_ENABLED:
         header = (
             json.dumps(
                 {
-                    "_schema": "session_events_v1",
+                    "_schema": "runtime_events_v1",
                     "note": "timestamp_ms UTC-ish; event_type + payload; no quote ticks; no raw exchange blobs",
                 },
                 ensure_ascii=False,
             )
             + "\n"
         )
-        _SESSION_TRACE_PATH.write_text(header, encoding="utf-8")
+        _EVENTS_LOG_PATH.write_text(header, encoding="utf-8")
+    elif _EVENTS_LOG_PATH.exists():
+        _EVENTS_LOG_PATH.write_text("", encoding="utf-8")
+
     _configure_root_logging()
     return _SESSION_TRACE_PATH
 
 
 def session_trace_log_path() -> Path:
-    """Путь к основному логу (по умолчанию только события JSONL)."""
+    """Путь к основному подробному текстовому логу."""
     return _SESSION_TRACE_PATH
 
 
 def full_session_log_path() -> Path:
-    """Путь к полному логу, если включён FULL_SESSION_LOG."""
-    return _FULL_LOG_PATH
+    """Legacy alias: основной подробный лог теперь session_trace.log."""
+    return _SESSION_TRACE_PATH
 
 
 def full_session_log_enabled() -> bool:
-    return _FULL_SESSION_LOG_ENABLED
+    return _SESSION_TRACE_LOG_ENABLED
 
 
 def events_log_enabled() -> bool:
@@ -174,33 +231,48 @@ def events_log_enabled() -> bool:
 
 
 def events_log_path() -> Path:
-    """Совпадает с session_trace_log_path — один файл."""
-    return _SESSION_TRACE_PATH
+    """Путь к отдельному JSONL-журналу runtime-событий."""
+    return _EVENTS_LOG_PATH
+
+
+def scanner_log_enabled() -> bool:
+    return _SCANNER_LOG_ENABLED
+
+
+def scanner_log_path() -> Path:
+    return _SCANNER_LOG_PATH
+
+
+def scanner_v2_log_enabled() -> bool:
+    return _SCANNER_V2_LOG_ENABLED
+
+
+def scanner_v2_log_path() -> Path:
+    return _SCANNER_V2_LOG_PATH
 
 
 def reset_events_log() -> Path:
-    """То же, что обнуление session_trace.log."""
+    """Сбрасывает только JSONL-журнал runtime-событий."""
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    _SESSION_TRACE_PATH.write_text("", encoding="utf-8")
-    return _SESSION_TRACE_PATH
+    _EVENTS_LOG_PATH.write_text("", encoding="utf-8")
+    return _EVENTS_LOG_PATH
 
 
 def _compact_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Убирает raw и значения None — меньше строка, те же факты для отчёта."""
     if not payload:
         return {}
     out: dict[str, Any] = {}
-    for k, v in payload.items():
-        if k == "raw":
+    for key, value in payload.items():
+        if key == "raw":
             continue
-        if v is None:
+        if value is None:
             continue
-        if isinstance(v, dict):
-            nested = _compact_event_payload(v)
+        if isinstance(value, dict):
+            nested = _compact_event_payload(value)
             if nested:
-                out[k] = nested
+                out[key] = nested
         else:
-            out[k] = v
+            out[key] = value
     return out
 
 
@@ -210,18 +282,20 @@ def append_runtime_event(*, worker_id: str, event_type: str, timestamp_ms: int, 
     if not _EVENTS_LOG_ALL and event_type in _DEFAULT_SKIP_EVENT_TYPES:
         return
     if _EVENTS_LOG_EXCLUDE:
-        for ex in _EVENTS_LOG_EXCLUDE:
-            if ex in event_type:
+        for excluded in _EVENTS_LOG_EXCLUDE:
+            if excluded in event_type:
                 return
-    pl = _compact_event_payload(dict(payload)) if _EVENTS_LOG_COMPACT else dict(payload)
+
+    compact_payload = _compact_event_payload(dict(payload)) if _EVENTS_LOG_COMPACT else dict(payload)
     line_obj = {
         "worker_id": worker_id,
         "event_type": event_type,
         "timestamp": timestamp_ms,
-        "payload": pl,
+        "payload": compact_payload,
     }
     line = json.dumps(line_obj, ensure_ascii=False, default=str) + "\n"
+
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
     with _events_log_lock:
-        with open(_SESSION_TRACE_PATH, "a", encoding="utf-8") as f:
-            f.write(line)
+        with open(_EVENTS_LOG_PATH, "a", encoding="utf-8") as handle:
+            handle.write(line)

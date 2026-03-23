@@ -30,6 +30,8 @@ class WorkerRuntimePartsMixin:
         should_evaluate_exit = False
         should_evaluate_entry = False
         should_emit_quote_received = False
+        startup_order_actions_blocked = False
+        execution_order_actions_blocked = False
         with self._state_lock:
             first_quote_for_instrument = quote.instrument_id not in self._latest_quotes
             self._latest_quotes[quote.instrument_id] = quote
@@ -52,15 +54,36 @@ class WorkerRuntimePartsMixin:
                     self.emit_event("right_quote_update", {"instrument": quote.instrument_id.symbol, "exchange": quote.instrument_id.exchange})
                 if self._has_live_spread():
                     self.emit_event("spread_update", {"edge_1": self.state.metrics.get("edge_1"), "edge_2": self.state.metrics.get("edge_2"), "spread_state": self.state.metrics.get("spread_state")})
+                    if getattr(self, "_mid_alarm_enabled", False):
+                        self._mid_alarm_tick()
                 if self._is_spread_entry_runtime:
-                    should_reevaluate_spread_execution = True
-                    should_restore_in_position = True
-                    should_check_hedge_protection = True
-                    if self.strategy_state is StrategyState.IN_POSITION:
-                        should_evaluate_exit = True
-                        should_evaluate_entry = self.active_exit_cycle is None
-                    else:
-                        should_evaluate_entry = True
+                    startup_order_actions_blocked = (
+                        self.position is None
+                        and self.active_entry_cycle is None
+                        and self.prefetch_entry_cycle is None
+                        and self.active_exit_cycle is None
+                        and self._startup_entry_gate_block_reason() is not None
+                    )
+                    execution_order_actions_blocked = (
+                        not startup_order_actions_blocked
+                        and self._execution_order_actions_block_reason(
+                            require_depth20=(
+                                self.position is None
+                                and self.active_entry_cycle is None
+                                and self.prefetch_entry_cycle is None
+                                and self.active_exit_cycle is None
+                            )
+                        ) is not None
+                    )
+                    if not startup_order_actions_blocked and not execution_order_actions_blocked:
+                        should_reevaluate_spread_execution = True
+                        should_restore_in_position = True
+                        should_check_hedge_protection = True
+                        if self.strategy_state is StrategyState.IN_POSITION:
+                            should_evaluate_exit = True
+                            should_evaluate_entry = self.active_exit_cycle is None
+                        else:
+                            should_evaluate_entry = True
             else:
                 should_emit_quote_received = True
         if should_emit_quote_received:

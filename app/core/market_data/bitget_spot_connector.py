@@ -136,6 +136,14 @@ class BitgetSpotPublicConnector(PublicMarketDataConnector):
                 self.logger.error("bitget spot quote callback failed: %s", exc)
 
     def _on_error(self, error: Any) -> None:
+        error_text = str(error or "").strip()
+        self._connected = False
+        if self._closing:
+            self.logger.info("bitget spot public ws closing | error=%s", error_text)
+            return
+        if error_text in {"Connection to remote host was lost.", "socket is already closed.", "'NoneType' object has no attribute 'sock'"}:
+            self.logger.warning("bitget spot public ws disconnected: %s", error_text)
+            return
         self.logger.error("bitget spot public ws error: %s", error)
 
     def _on_close(self, code: Any, message: Any) -> None:

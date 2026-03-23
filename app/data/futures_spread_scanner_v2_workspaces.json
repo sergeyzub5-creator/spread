@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "active_workspace_id": "workspace_2a1fde5b",
+  "workspaces": [
+    {
+      "workspace_id": "workspace_2a1fde5b",
+      "title": "Фьючерзы",
+      "top_volume_limit": 200,
+      "sort_role": "output",
+      "sort_source_id": "spread::binance_futures_perp::bybit_futures_perp",
+      "sort_key": "spread::binance_futures_perp::bybit_futures_perp",
+      "sort_descending": true,
+      "version": 1,
+      "column_stretch_by_role": {
+        "starter": 14,
+        "base": 20,
+        "output": 8
+      },
+      "nodes": [
+        {
+          "node_id": "starter_1",
+          "runtime_class": "starter",
+          "runtime_id": "pair",
+          "exchange_id": null,
+          "asset_type": null,
+          "selected_type": "pair",
+          "bookmark_order": [],
+          "depends_on": []
+        },
+        {
+          "node_id": "base_1",
+          "runtime_class": "base",
+          "runtime_id": "binance_futures_perp",
+          "exchange_id": "binance",
+          "asset_type": "perpetual_futures",
+          "selected_type": null,
+          "bookmark_order": [],
+          "depends_on": [
+            "starter_1"
+          ]
+        },
+        {
+          "node_id": "base_2",
+          "runtime_class": "base",
+          "runtime_id": "bybit_futures_perp",
+          "exchange_id": "bybit",
+          "asset_type": "perpetual_futures",
+          "selected_type": null,
+          "bookmark_order": [],
+          "depends_on": [
+            "starter_1"
+          ]
+        },
+        {
+          "node_id": "output_1",
+          "runtime_class": "output",
+          "runtime_id": "rate_delta::binance_futures_perp::bybit_futures_perp",
+          "exchange_id": null,
+          "asset_type": null,
+          "selected_type": "rate_delta",
+          "bookmark_order": [],
+          "depends_on": [
+            "starter_1",
+            "base_1",
+            "base_2"
+          ]
+        },
+        {
+          "node_id": "output_2",
+          "runtime_class": "output",
+          "runtime_id": "spread::binance_futures_perp::bybit_futures_perp",
+          "exchange_id": null,
+          "asset_type": null,
+          "selected_type": "spread",
+          "bookmark_order": [],
+          "depends_on": [
+            "starter_1",
+            "base_1",
+            "base_2"
+          ]
+        }
+      ]
+    }
+  ]
+}

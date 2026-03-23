@@ -176,15 +176,17 @@ class BybitPrivateExecutionStream:
             self._last_pong_ts_ms = int(time.time() * 1000)
             return
         if op == "auth":
-            success = bool(payload.get("success", False))
+            success = self._is_auth_success(payload)
             if success:
                 self._authenticated = True
                 self._session_ready = True
                 self._auth_event.set()
+                self._connect_error = None
                 self._subscribe_topics()
                 self._logger.info("bybit private stream authenticated")
             else:
-                self._connect_error = RuntimeError(str(payload.get("retMsg", "auth failed")))
+                error_text = str(payload.get("retMsg") or payload.get("ret_msg") or "auth failed")
+                self._connect_error = RuntimeError(error_text)
                 self._auth_event.set()
             return
         topic = str(payload.get("topic", "")).strip().lower()
@@ -203,6 +205,18 @@ class BybitPrivateExecutionStream:
 
     def _subscribe_topics(self) -> None:
         self._send({"op": "subscribe", "args": ["order", "execution"]})
+
+    @staticmethod
+    def _is_auth_success(payload: dict[str, Any]) -> bool:
+        if bool(payload.get("success", False)):
+            return True
+        try:
+            ret_code = int(payload.get("retCode", 0) or 0)
+        except (TypeError, ValueError):
+            ret_code = -1
+        if ret_code == 0:
+            return True
+        return False
 
     def _normalize_events(self, payload: dict[str, Any]) -> list[ExecutionStreamEvent]:
         topic = str(payload.get("topic", "")).strip().lower()
@@ -282,8 +296,16 @@ class BybitPrivateExecutionStream:
         return {"op": "auth", "args": [self._credentials.api_key, expires, signature]}
 
     def _on_error(self, error: Any) -> None:
-        self._logger.error("bybit private stream error: %s", error)
         self._last_error_text = str(error)
+        error_text = str(error or "").strip()
+        self._connected = False
+        self._authenticated = False
+        if self._closing:
+            self._logger.info("bybit private stream closing | error=%s", error_text)
+        elif error_text in {"Connection to remote host was lost.", "socket is already closed.", "'NoneType' object has no attribute 'sock'"}:
+            self._logger.warning("bybit private stream disconnected: %s", error_text)
+        else:
+            self._logger.error("bybit private stream error: %s", error)
         if not self._connected and self._connect_error is None:
             self._connect_error = error if isinstance(error, Exception) else RuntimeError(str(error))
             self._opened_event.set()
@@ -322,6 +344,13 @@ class BybitPrivateExecutionStream:
             ws_app.send(json.dumps(payload))
         except Exception as exc:
             self._logger.warning("bybit private stream send failed: %s", exc)
+            with self._lock:
+                self._connected = False
+                self._authenticated = False
+            try:
+                ws_app.close()
+            except Exception:
+                pass
             raise
 
     @staticmethod
@@ -339,4 +368,3 @@ class BybitPrivateExecutionStream:
             return int(value)
         except (TypeError, ValueError):
             return None
-

@@ -86,6 +86,11 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
         self._is_dual_execution_runtime = self._run_mode == "dual_exchange_test_execution"
         self._is_spread_entry_runtime = self._run_mode == "spread_entry_execution"
         self._is_dual_runtime = self._is_dual_quotes_runtime or self._is_dual_execution_runtime or self._is_spread_entry_runtime
+        # Mid-alarm: defer depth20 + execution adapters until |mid| >= entry_threshold; 60s window extend on touch.
+        self._mid_alarm_enabled = self._is_spread_entry_runtime and self._mid_alarm_param_enabled()
+        self._mid_alarm_window_ms = max(1000, self._int_or_zero(self.task.runtime_params.get("mid_alarm_window_sec") or 60) * 1000)
+        self._mid_alarm_armed_until_ms: int = 0
+        self._mid_alarm_resources_held: bool = False
         self._dual_order_clocks: dict[str, dict[str, Any]] = {"left": {}, "right": {}}
         self._dual_poll_threads: dict[str, threading.Thread] = {}
         self._dual_poll_attempt_ids: dict[str, str | None] = {"left": None, "right": None}
@@ -197,6 +202,10 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
         self._watchdog_stop_event = threading.Event()
         self._watchdog_thread: threading.Thread | None = None
         self._runtime_reconcile_thread: threading.Thread | None = None
+        self._startup_entry_gate_opened = not self._is_spread_entry_runtime
+        self._startup_entry_gate_opened_at_ms: int | None = None
+        self._last_startup_entry_gate_reason_emitted: str | None = None
+        self._startup_entry_gate_open_event_emitted = False
         self._entry_recovery_started_ms: int | None = None
         self._exit_recovery_started_ms: int | None = None
         self._hedge_protection_started_ms: int | None = None
@@ -389,6 +398,9 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
                 "last_reconcile_ts": None,
                 "execution_stream_health_status": None,
                 "execution_stream_health": None,
+                "startup_entry_ready": not self._is_spread_entry_runtime,
+                "startup_entry_ready_ts": None,
+                "startup_entry_gate_reason": None if not self._is_spread_entry_runtime else "STARTUP_WAIT_QUOTES",
             },
         )
 
@@ -412,11 +424,29 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
                     self._entry_pipeline_mode_fallback_reason,
                 )
         for instrument in self._subscribed_instruments:
-            self.market_data_service.subscribe_l1(instrument, self.on_quote)
-            self.logger.info("worker subscribed to L1 | exchange=%s | symbol=%s", instrument.exchange, instrument.symbol)
+            # Mid-alarm: L1 only first — depth20 starts when |mid| crosses threshold (ensure_depth20).
+            depth_on_sub = not self._mid_alarm_enabled
+            self.market_data_service.subscribe_l1(instrument, self.on_quote, enable_depth20=depth_on_sub)
+            self.logger.info(
+                "worker subscribed to L1 | exchange=%s | symbol=%s | depth20_on_subscribe=%s",
+                instrument.exchange,
+                instrument.symbol,
+                depth_on_sub,
+            )
         with self._state_lock:
-            if self._is_dual_execution_runtime or self._is_spread_entry_runtime:
+            if self._is_dual_execution_runtime or (self._is_spread_entry_runtime and not self._mid_alarm_enabled):
                 self._ensure_dual_execution_adapters()
+            elif self._is_spread_entry_runtime:
+                self._mid_alarm_arm_resources()
+                self._mid_alarm_armed_until_ms = int(time.time() * 1000) + self._mid_alarm_window_ms
+                self.state.metrics["mid_alarm_active"] = True
+                self.state.metrics["mid_alarm_armed_until_ms"] = self._mid_alarm_armed_until_ms
+                self.state.metrics["mid_alarm_mid_mag"] = None
+                self.logger.info(
+                    "spread entry runtime start | mid_alarm_enabled=%s | startup_warmup_window_ms=%s | execution adapters raised",
+                    self._mid_alarm_enabled,
+                    self._mid_alarm_window_ms,
+                )
             elif not self._is_dual_quotes_runtime:
                 self._ensure_execution_adapter()
             self._update_activity_status()
@@ -436,6 +466,11 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
         exit_recovery_thread = self._exit_recovery_thread
         hedge_thread = self._hedge_protection_thread
         runtime_reconcile_thread = self._runtime_reconcile_thread
+        if self._mid_alarm_resources_held:
+            try:
+                self._mid_alarm_disarm_release(reason="worker_stop")
+            except Exception:
+                pass
         for instrument in self._subscribed_instruments:
             self.market_data_service.unsubscribe_l1(instrument, self.on_quote)
         with self._state_lock:
@@ -562,11 +597,11 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
             if self._hedge_check_requested:
                 self._hedge_check_requested = False
                 run_hedge = True
-        if run_exit:
+        if run_exit and self._execution_order_actions_block_reason() is None:
             self._evaluate_spread_exit()
-        if run_hedge:
+        if run_hedge and self._execution_order_actions_block_reason() is None:
             self._maybe_start_hedge_protection()
-        if run_entry:
+        if run_entry and self._execution_order_actions_block_reason(require_depth20=True) is None:
             self._evaluate_spread_entry()
 
     def trigger_entry_signal(self) -> None:
@@ -854,7 +889,10 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
         if not streams:
             return "UNKNOWN"
         connected_values = [bool(item.get("connected")) for item in streams.values()]
+        authenticated_values = [item.get("authenticated") for item in streams.values() if item.get("authenticated") is not None]
         if all(connected_values):
+            if authenticated_values and not all(bool(value) for value in authenticated_values):
+                return "DEGRADED"
             return "HEALTHY"
         if any(connected_values):
             return "DEGRADED"
@@ -975,6 +1013,20 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
             validation_result.liquidity_ok,
             validation_result.fresh_ok,
         )
+        self.emit_event(
+            "entry_validation_state",
+            {
+                "freshness_threshold_ms": self._entry_freshness_threshold_ms,
+                "is_valid": validation_result.is_valid,
+                "reason": validation_result.block_reason,
+                "left_valid": validation_result.left_valid,
+                "right_valid": validation_result.right_valid,
+                "liquidity_ok": validation_result.liquidity_ok,
+                "fresh_ok": validation_result.fresh_ok,
+                "left_liquidity_ok": validation_result.left_liquidity_ok,
+                "right_liquidity_ok": validation_result.right_liquidity_ok,
+            },
+        )
 
     def _maybe_log_entry_recovery_waiting(self, *, settle_grace_ms: int, left_status: str, right_status: str) -> None:
         signature = (left_status, right_status, int(settle_grace_ms // 250))
@@ -1012,6 +1064,15 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
             signature[1],
             signature[2],
             mismatch_fmt,
+        )
+        self.emit_event(
+            "hedge_protection_resynced",
+            {
+                "reason": reason,
+                "left_actual_position_qty": signature[1],
+                "right_actual_position_qty": signature[2],
+                "qty_mismatch": mismatch_fmt,
+            },
         )
 
     def _maybe_log_entry_cycle_clamp(
@@ -1109,6 +1170,209 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
             self._right_execution_adapter.on_execution_event(lambda event, leg_name="right": self._on_dual_execution_event(leg_name, event))
         return {"left": self._left_execution_adapter, "right": self._right_execution_adapter}
 
+    def _startup_entry_gate_requires_depth20(self) -> bool:
+        raw = str(self.task.runtime_params.get("entry_use_depth20_liquidity") or "1").strip().lower()
+        return raw not in {"0", "false", "off", "no"}
+
+    def _execution_order_actions_block_reason(self, *, require_depth20: bool = False) -> str | None:
+        if not self._is_spread_entry_runtime:
+            return None
+        adapters = self._execution_health_adapters()
+        if "left" not in adapters or "right" not in adapters:
+            return "WAIT_EXECUTION"
+        health_status = str(self.state.metrics.get("execution_stream_health_status") or "").strip().upper()
+        if health_status != "HEALTHY":
+            return "WAIT_EXECUTION_STREAMS"
+        health_snapshot = self.state.metrics.get("execution_stream_health")
+        streams = health_snapshot.get("streams") if isinstance(health_snapshot, dict) else {}
+        if isinstance(streams, dict):
+            for leg_name in ("left", "right"):
+                stream = streams.get(leg_name)
+                if not isinstance(stream, dict):
+                    continue
+                if not bool(stream.get("connected")):
+                    return "WAIT_EXECUTION_STREAMS"
+                authenticated = stream.get("authenticated")
+                if authenticated is False:
+                    return "WAIT_EXECUTION_AUTH"
+        if require_depth20 and self._startup_entry_gate_requires_depth20():
+            if (
+                self.market_data_service.get_depth20_snapshot(self._left_instrument) is None
+                or self.market_data_service.get_depth20_snapshot(self._right_instrument) is None
+            ):
+                return "WAIT_DEPTH"
+        return None
+
+    def _startup_entry_gate_block_reason(self) -> str | None:
+        if not self._is_spread_entry_runtime:
+            return None
+        if self._startup_entry_gate_opened:
+            self.state.metrics["startup_entry_ready"] = True
+            self.state.metrics["startup_entry_gate_reason"] = None
+            if not self._startup_entry_gate_open_event_emitted:
+                self._startup_entry_gate_open_event_emitted = True
+                self._last_startup_entry_gate_reason_emitted = None
+                self.emit_event(
+                    "startup_entry_gate_opened",
+                    {
+                        "left_symbol": self._left_instrument.symbol,
+                        "right_symbol": self._right_instrument.symbol,
+                        "health": self.state.metrics.get("execution_stream_health_status"),
+                        "depth_required": self._startup_entry_gate_requires_depth20(),
+                        "opened_at_ms": self._startup_entry_gate_opened_at_ms,
+                    },
+                )
+            return None
+        current_reason: str | None = None
+        if self._latest_quotes.get(self._left_instrument) is None or self._latest_quotes.get(self._right_instrument) is None:
+            self.state.metrics["startup_entry_ready"] = False
+            self.state.metrics["startup_entry_gate_reason"] = "STARTUP_WAIT_QUOTES"
+            current_reason = "STARTUP_WAIT_QUOTES"
+        else:
+            execution_block_reason = self._execution_order_actions_block_reason(require_depth20=True)
+            if execution_block_reason == "WAIT_EXECUTION":
+                self.state.metrics["startup_entry_ready"] = False
+                self.state.metrics["startup_entry_gate_reason"] = "STARTUP_WAIT_EXECUTION"
+                current_reason = "STARTUP_WAIT_EXECUTION"
+            health_status = str(self.state.metrics.get("execution_stream_health_status") or "").strip().upper()
+            if execution_block_reason == "WAIT_EXECUTION_STREAMS":
+                self.state.metrics["startup_entry_ready"] = False
+                self.state.metrics["startup_entry_gate_reason"] = "STARTUP_WAIT_EXECUTION_STREAMS"
+                current_reason = "STARTUP_WAIT_EXECUTION_STREAMS"
+            if execution_block_reason == "WAIT_EXECUTION_AUTH":
+                self.state.metrics["startup_entry_ready"] = False
+                self.state.metrics["startup_entry_gate_reason"] = "STARTUP_WAIT_EXECUTION_AUTH"
+                current_reason = "STARTUP_WAIT_EXECUTION_AUTH"
+            if execution_block_reason == "WAIT_DEPTH":
+                self.state.metrics["startup_entry_ready"] = False
+                self.state.metrics["startup_entry_gate_reason"] = "STARTUP_WAIT_DEPTH"
+                current_reason = "STARTUP_WAIT_DEPTH"
+            if current_reason is None:
+                self._startup_entry_gate_opened = True
+                self._startup_entry_gate_opened_at_ms = int(time.time() * 1000)
+                self.state.metrics["startup_entry_ready"] = True
+                self.state.metrics["startup_entry_ready_ts"] = self._startup_entry_gate_opened_at_ms
+                self.state.metrics["startup_entry_gate_reason"] = None
+                self._startup_entry_gate_open_event_emitted = True
+                self._last_startup_entry_gate_reason_emitted = None
+                self.logger.info(
+                    "startup entry gate opened | left_symbol=%s | right_symbol=%s | health=%s | depth_required=%s",
+                    self._left_instrument.symbol,
+                    self._right_instrument.symbol,
+                    health_status,
+                    self._startup_entry_gate_requires_depth20(),
+                )
+                self.emit_event(
+                    "startup_entry_gate_opened",
+                    {
+                        "left_symbol": self._left_instrument.symbol,
+                        "right_symbol": self._right_instrument.symbol,
+                        "health": health_status,
+                        "depth_required": self._startup_entry_gate_requires_depth20(),
+                        "opened_at_ms": self._startup_entry_gate_opened_at_ms,
+                    },
+                )
+                self.state.metrics["activity_status"] = self._derive_activity_status(startup_gate_blocked=False)
+                return None
+        if current_reason != self._last_startup_entry_gate_reason_emitted:
+            self._last_startup_entry_gate_reason_emitted = current_reason
+            self._startup_entry_gate_open_event_emitted = False
+            self.emit_event(
+                "startup_entry_gate_wait",
+                {
+                    "reason": current_reason,
+                    "left_symbol": self._left_instrument.symbol,
+                    "right_symbol": self._right_instrument.symbol,
+                    "health": self.state.metrics.get("execution_stream_health_status"),
+                    "depth_required": self._startup_entry_gate_requires_depth20(),
+                    "left_has_quote": self._latest_quotes.get(self._left_instrument) is not None,
+                    "right_has_quote": self._latest_quotes.get(self._right_instrument) is not None,
+                },
+            )
+        return current_reason
+
+    def _mid_alarm_param_enabled(self) -> bool:
+        raw = self.task.runtime_params.get("mid_alarm_enabled")
+        if raw is None:
+            return False
+        s = str(raw).strip().lower()
+        return s in {"1", "true", "yes", "on"}
+
+    def _mid_alarm_arm_resources(self) -> None:
+        """Raise depth20 + execution adapters; idempotent while armed window active."""
+        if not self._mid_alarm_enabled or self._mid_alarm_resources_held:
+            return
+        self.market_data_service.ensure_depth20(self._left_instrument)
+        self.market_data_service.ensure_depth20(self._right_instrument)
+        self._ensure_dual_execution_adapters()
+        self._mid_alarm_resources_held = True
+        self.logger.info("mid_alarm armed | depth20+execution adapters raised")
+
+    def _mid_alarm_disarm_release(self, *, reason: str) -> None:
+        """Drop depth20 refcount and close adapters when window expires or worker stops."""
+        if not self._mid_alarm_resources_held:
+            return
+        self.market_data_service.release_depth20(self._left_instrument)
+        self.market_data_service.release_depth20(self._right_instrument)
+        with self._state_lock:
+            left_adapter = self._left_execution_adapter
+            right_adapter = self._right_execution_adapter
+            self._left_execution_adapter = None
+            self._right_execution_adapter = None
+        for adapter in (left_adapter, right_adapter):
+            if adapter is not None:
+                try:
+                    adapter.close()
+                except Exception:
+                    pass
+        self._mid_alarm_resources_held = False
+        self._mid_alarm_armed_until_ms = 0
+        self.logger.info("mid_alarm disarmed | reason=%s", reason)
+
+    def _mid_alarm_tick(self) -> None:
+        """Call from on_quote when spread entry + mid_alarm; extends window on |mid| touch, releases on timeout."""
+        if not self._mid_alarm_enabled or self.state.status != "running":
+            return
+        if self.position is not None or self.active_entry_cycle is not None:
+            # In position or entering — keep resources; stop managing window here.
+            if not self._mid_alarm_resources_held:
+                self._mid_alarm_arm_resources()
+            return
+        now_ms = int(time.time() * 1000)
+        threshold = self._decimal_or_zero(self.task.runtime_params.get("entry_threshold") or self.task.entry_threshold)
+        left_q = self._latest_quotes.get(self._left_instrument)
+        right_q = self._latest_quotes.get(self._right_instrument)
+        if left_q is None or right_q is None or threshold <= Decimal("0"):
+            return
+        from app.core.workers.runtime_spread_utils import mid_spread_ratio
+
+        mid_mag = mid_spread_ratio(left_q, right_q)
+        if mid_mag is None:
+            return
+        if mid_mag >= threshold:
+            self._mid_alarm_arm_resources()
+            self._mid_alarm_armed_until_ms = now_ms + self._mid_alarm_window_ms
+            with self._state_lock:
+                self.state.metrics["mid_alarm_armed_until_ms"] = self._mid_alarm_armed_until_ms
+                self.state.metrics["mid_alarm_active"] = True
+                self.state.metrics["mid_alarm_mid_mag"] = self._format_edge(mid_mag)
+        elif self._mid_alarm_resources_held and now_ms > self._mid_alarm_armed_until_ms:
+            self._mid_alarm_disarm_release(reason="mid_alarm_window_expired")
+            with self._state_lock:
+                self.state.metrics["mid_alarm_active"] = False
+                self.state.metrics["mid_alarm_armed_until_ms"] = None
+                self.state.metrics["mid_alarm_mid_mag"] = None
+
+    def _mid_alarm_entry_allowed(self) -> bool:
+        if not self._mid_alarm_enabled:
+            return True
+        if self.position is not None:
+            return True
+        now_ms = int(time.time() * 1000)
+        if not self._mid_alarm_resources_held or now_ms > self._mid_alarm_armed_until_ms:
+            return False
+        return True
+
     def _ensure_execution_adapter(self) -> ExecutionAdapter:
         if self._execution_adapter is not None:
             return self._execution_adapter
@@ -1151,6 +1415,16 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
             self._run_mode,
             adapter.route_name(),
         )
+        self.emit_event(
+            "execution_route_selected",
+            {
+                "leg": leg_name,
+                "exchange": instrument.exchange,
+                "symbol": instrument.symbol,
+                "run_mode": self._run_mode,
+                "route": adapter.route_name(),
+            },
+        )
 
     def _log_entry_decision(
         self,
@@ -1175,6 +1449,23 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
             validation_result.get("left_liquidity_ok"),
             validation_result.get("right_liquidity_ok"),
         )
+        self.emit_event(
+            "entry_decision_snapshot",
+            {
+                "best_edge": self._format_edge(decision.edge),
+                "entry_threshold": self._format_edge(decision.threshold),
+                "direction": decision.direction,
+                "entry_state": self.strategy_state.value,
+                "block_reason": decision.block_reason,
+                "freshness_threshold_ms": self._entry_freshness_threshold_ms,
+                "left_quote_age_ms": self.state.metrics.get("left_quote_age_ms"),
+                "right_quote_age_ms": self.state.metrics.get("right_quote_age_ms"),
+                "left_liquidity_ok": validation_result.get("left_liquidity_ok"),
+                "right_liquidity_ok": validation_result.get("right_liquidity_ok"),
+                "forced_signal": decision.forced_signal,
+                "executable": decision.is_executable,
+            },
+        )
         return True
 
     def _should_log_entry_block_reason(self, reason: str) -> bool:
@@ -1187,6 +1478,7 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
             "WAITING_QUOTES",
             "LEFT_STALE_QUOTE",
             "RIGHT_STALE_QUOTE",
+            "MID_ALARM_DISARMED",
         }:
             # Noisy background states: keep first log, then throttle harder.
             min_interval_ms = 5000
@@ -1209,6 +1501,15 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
     def _log_entry_blocked(self, reason: str, *, decision_logged: bool) -> None:
         if decision_logged:
             self.logger.info("entry blocked | reason=%s", reason)
+            self.emit_event(
+                "entry_blocked",
+                {
+                    "reason": reason,
+                    "strategy_state": self.strategy_state.value,
+                    "activity_status": self.state.metrics.get("activity_status"),
+                    "startup_gate_reason": self.state.metrics.get("startup_entry_gate_reason"),
+                },
+            )
 
     def _set_strategy_state(self, new_state: StrategyState) -> None:
         with self._state_lock:
@@ -1222,10 +1523,19 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
             self._update_activity_status()
             self.logger.info("strategy state transition | from=%s | to=%s", previous.value, new_state.value)
 
-    def _update_activity_status(self) -> None:
+    def _derive_activity_status(self, *, startup_gate_blocked: bool | None = None) -> str:
         status = "STOPPED"
         if self.state.status == "running":
-            if self.strategy_state in {StrategyState.ENTRY_ARMED, StrategyState.ENTRY_SUBMITTING, StrategyState.ENTRY_PARTIAL}:
+            if startup_gate_blocked is None:
+                startup_gate_blocked = (
+                    self._is_spread_entry_runtime
+                    and self.position is None
+                    and self.strategy_state not in {StrategyState.ENTRY_ARMED, StrategyState.ENTRY_SUBMITTING, StrategyState.ENTRY_PARTIAL}
+                    and self._startup_entry_gate_block_reason() is not None
+                )
+            if startup_gate_blocked:
+                status = "STARTING"
+            elif self.strategy_state in {StrategyState.ENTRY_ARMED, StrategyState.ENTRY_SUBMITTING, StrategyState.ENTRY_PARTIAL}:
                 status = "ENTERING"
             elif self.strategy_state in {StrategyState.EXIT_ARMED, StrategyState.EXIT_SUBMITTING, StrategyState.EXIT_PARTIAL}:
                 status = "EXITING"
@@ -1245,7 +1555,10 @@ class WorkerRuntime(WorkerRuntimeExecutionMixin, WorkerRuntimeSizingMixin, Worke
                 status = "WAITING_EXIT"
             else:
                 status = "WAITING_ENTRY"
-        self.state.metrics["activity_status"] = status
+        return status
+
+    def _update_activity_status(self) -> None:
+        self.state.metrics["activity_status"] = self._derive_activity_status()
 
     @staticmethod
     def _is_margin_limit_error(error_text: str | None) -> bool:

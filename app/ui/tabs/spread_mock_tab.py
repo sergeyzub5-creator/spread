@@ -505,7 +505,7 @@ class SpreadMockTab(QWidget):
 
         button = QPushButton("WS" if route_name == "ws" else "REST")
         button.setObjectName("transportBadge")
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setCursor(Qt.CursorShape.ArrowCursor)
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         button.setFixedHeight(20)
         button.setFixedWidth(50)
@@ -546,7 +546,7 @@ class SpreadMockTab(QWidget):
             }
         if normalized == "bybit":
             return {
-                "ws": {"active": False, "available": False, "reason": tr("spread.transport.bybit_ws_unavailable")},
+                "ws": {"active": True, "available": True, "reason": ""},
                 "rest": {"active": False, "available": False, "reason": tr("spread.transport.bybit_rest_unavailable")},
             }
         return default
@@ -743,6 +743,7 @@ class SpreadMockTab(QWidget):
         market_type = state["market_type"]
         if not exchange or not market_type:
             return
+        show_all = str(market_type or "").strip().lower() == "futures"
         query = str(text or "").strip().upper()
         items = self.coordinator.list_instrument_items(exchange, market_type)
         display_map: dict[str, str] = {}
@@ -768,13 +769,16 @@ class SpreadMockTab(QWidget):
                 for display in displays
                 if (query in display or query in display_map.get(display, "")) and display not in starts_with
             ]
-            filtered = [*starts_with, *contains][:5]
+            filtered = [*starts_with, *contains]
+            if not show_all:
+                filtered = filtered[:5]
         else:
-            filtered = usdt_displays[:5] or displays[:5]
+            filtered = usdt_displays or displays if show_all else (usdt_displays[:5] or displays[:5])
 
         model = self._pair_models[slot_name]
         model.setStringList(filtered)
         completer = self._pair_completers[slot_name]
+        completer.setMaxVisibleItems(max(5, len(filtered)) if show_all else 5)
         completer.popup().setFixedWidth(self._pair_inputs[slot_name].width())
         if filtered and force_popup:
             completer.setCompletionPrefix(query)
@@ -1191,16 +1195,19 @@ class SpreadMockTab(QWidget):
         card_params = {
             "entry_threshold": self._spread_threshold_percent_to_ratio(entry_threshold_ui),
             "exit_threshold": self._spread_threshold_percent_to_ratio(exit_threshold_ui),
-            "entry_notional_usdt": str(strategy_params.get("spread.target_size") or "0"),
+            "entry_notional_usdt": str(strategy_params.get("spread.target_size") or "10"),
             "entry_min_step_pct": str(strategy_params.get("spread.entry_min_step_pct") or "20"),
             "strategy_signal_mode": self._strategy_signal_mode,
         }
 
+        # Spread entry runtime пока только для бессрочных; срочные — dual quotes (L1) до доработки рантайма
+        both_perpetual = (
+            str(left["market_type"]) == "perpetual" and str(right["market_type"]) == "perpetual"
+        )
         if (
             left_credentials is not None
             and right_credentials is not None
-            and str(left["market_type"]) == "perpetual"
-            and str(right["market_type"]) == "perpetual"
+            and both_perpetual
             and self._has_active_execution_route(str(left["exchange"]))
             and self._has_active_execution_route(str(right["exchange"]))
         ):
@@ -1338,7 +1345,7 @@ class SpreadMockTab(QWidget):
         metrics = state.get("metrics") if isinstance(state.get("metrics"), dict) else {}
         card = self._runtime_cards.get(worker_id)
         if card is not None:
-            activity_status = str(metrics.get("activity_status") or ("WAITING_ENTRY" if is_running else "STOPPED"))
+            activity_status = str(metrics.get("activity_status") or ("STARTING" if is_running else "STOPPED"))
             stream_health = str(metrics.get("execution_stream_health_status") or "UNKNOWN")
             card.update_status(activity_status, stream_health)
             card.update_volume(str(metrics.get("current_position_notional_usdt") or "0"))

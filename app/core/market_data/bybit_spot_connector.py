@@ -33,13 +33,40 @@ class BybitSpotPublicConnector(PublicMarketDataConnector):
         self._watchdog_thread: threading.Thread | None = None
         self._lock = threading.RLock()
         self._last_message_ts_ms = 0
+        self._last_disconnect_ts_ms = 0
 
     def connect(self) -> None:
         if websocket is None:
             raise RuntimeError("websocket-client is required for BybitSpotPublicConnector")
+        stale_thread: threading.Thread | None = None
+        stale_ws_app = None
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
+                now_ms = int(time.time() * 1000)
+                disconnected_for_ms = now_ms - int(self._last_disconnect_ts_ms or 0)
+                if self._connected or self._last_disconnect_ts_ms <= 0 or disconnected_for_ms < 2000:
+                    return
+                self.logger.warning(
+                    "bybit spot public ws hard reconnect | disconnected_for_ms=%s",
+                    disconnected_for_ms,
+                )
+                self._closing = True
+                stale_thread = self._thread
+                stale_ws_app = self._ws_app
+            else:
+                self._closing = False
+                self._thread = threading.Thread(target=self._run_forever, name="bybit-spot-public-ws", daemon=True)
+                self._thread.start()
                 return
+
+        if stale_ws_app is not None:
+            try:
+                stale_ws_app.close()
+            except Exception:
+                pass
+        if stale_thread is not None and stale_thread is not threading.current_thread():
+            stale_thread.join(timeout=1.0)
+        with self._lock:
             self._closing = False
             self._thread = threading.Thread(target=self._run_forever, name="bybit-spot-public-ws", daemon=True)
             self._thread.start()
@@ -82,6 +109,9 @@ class BybitSpotPublicConnector(PublicMarketDataConnector):
                 self._ws_app.run_forever()
             except Exception as exc:  # pragma: no cover
                 self.logger.error("bybit spot public ws loop crashed: %s", exc)
+            finally:
+                with self._lock:
+                    self._ws_app = None
             if self._closing:
                 break
             time.sleep(backoff_seconds)
@@ -90,6 +120,7 @@ class BybitSpotPublicConnector(PublicMarketDataConnector):
     def _on_open(self) -> None:
         self.logger.info("bybit spot public ws connected")
         self._connected = True
+        self._last_disconnect_ts_ms = 0
         self._last_message_ts_ms = int(time.time() * 1000)
         self._start_watchdog_loop()
         with self._lock:
@@ -124,10 +155,20 @@ class BybitSpotPublicConnector(PublicMarketDataConnector):
                 self.logger.error("bybit spot quote callback failed: %s", exc)
 
     def _on_error(self, error: Any) -> None:
+        error_text = str(error or "").strip()
+        self._connected = False
+        self._last_disconnect_ts_ms = int(time.time() * 1000)
+        if self._closing:
+            self.logger.info("bybit spot public ws closing | error=%s", error_text)
+            return
+        if error_text in {"Connection to remote host was lost.", "socket is already closed.", "'NoneType' object has no attribute 'sock'"}:
+            self.logger.warning("bybit spot public ws disconnected: %s", error_text)
+            return
         self.logger.error("bybit spot public ws error: %s", error)
 
     def _on_close(self, code: Any, message: Any) -> None:
         self._connected = False
+        self._last_disconnect_ts_ms = int(time.time() * 1000)
         self.logger.info("bybit spot public ws closed | code=%s | message=%s", code, message)
 
     def _start_watchdog_loop(self) -> None:
@@ -185,6 +226,7 @@ class BybitSpotPublicConnector(PublicMarketDataConnector):
             self.logger.warning("bybit spot public ws send failed: %s", exc)
             with self._lock:
                 self._connected = False
+                self._last_disconnect_ts_ms = int(time.time() * 1000)
             try:
                 ws_app.close()
             except Exception:

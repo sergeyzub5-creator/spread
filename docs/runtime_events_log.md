@@ -1,31 +1,47 @@
-# Лог по умолчанию: только события
+# Логи runtime
 
-## Как сейчас
+## По умолчанию
 
-- **`logs/session_trace.log`** — **по умолчанию только события** (`emit_event`), одна строка = один JSON. Запуск = файл обнуляется.
-- **Полный лог** (вся простыня INFO как раньше) — **опционально**:  
-  `SPREAD_SNIPER_FULL_SESSION_LOG=1` → пишется в **`logs/session_trace_full.log`**.
+- `logs/session_trace.log` — основной подробный текстовый лог всего приложения
+- `logs/runtime_events.log` — отдельный JSONL-журнал `emit_event`
 
-Ничего выставлять не нужно: просто `py 1.py` — события уже идут в `session_trace.log`.
+Оба файла сбрасываются при запуске через `py 1.py`.
 
-## Опционально
+## Что смотреть первым
+
+- Для разбора зависаний, стартов, reconnection, hedge/entry/exit логики — `logs/session_trace.log`
+- Для компактного следа runtime-событий по `worker_id` — `logs/runtime_events.log`
+
+## Переменные окружения
 
 | Переменная | Эффект |
 |------------|--------|
-| `SPREAD_SNIPER_FULL_SESSION_LOG=1` | Дополнительно полный текстовый лог в `session_trace_full.log` |
-| `SPREAD_SNIPER_EVENTS_LOG=0` | Не писать события в `session_trace.log` |
-| `SPREAD_SNIPER_EVENTS_LOG_EXCLUDE=a,b` | Не писать события, где `event_type` содержит подстроку `a` или `b` |
-| `SPREAD_SNIPER_EVENTS_LOG_ALL=1` | Писать **все** типы событий (в т.ч. тики котировок и дубликаты `*_order_event` / `rest_poll_*` и т.д.) — по умолчанию они **отфильтрованы** |
-| `SPREAD_SNIPER_EVENTS_LOG_COMPACT=0` | Не ужимать payload: оставить `raw` и `null` (строки длиннее; для отчёта обычно не нужно) |
+| `SPREAD_SNIPER_SESSION_TRACE_LOG=0` | Не писать подробный текстовый лог в `session_trace.log` |
+| `SPREAD_SNIPER_EVENTS_LOG=0` | Не писать JSONL-события в `runtime_events.log` |
+| `SPREAD_SNIPER_EVENTS_LOG_EXCLUDE=a,b` | Исключить события, где `event_type` содержит `a` или `b` |
+| `SPREAD_SNIPER_EVENTS_LOG_ALL=1` | Писать все типы событий, включая шумные |
+| `SPREAD_SNIPER_EVENTS_LOG_COMPACT=0` | Не ужимать payload: оставлять `raw` и `null` |
 
-По умолчанию **не пишутся** (чтобы лог был пригоден для отчёта за часы): тики котировок; `left/right_order_event`, `entry_left/right_event` (сырой поток); `rest_poll_*`; `dual_exec_attempts_bound` / `entry_attempts_bound`; дубликаты `*_sent`, `entry_*_ack`, `entry_*_fill`; `execution_stream_health_updated` (тяжёлый payload). Остаются, например: `runtime_started` / `runtime_stopped`, `entry_signal_detected`, `entry_started`, `left_order_ack` / `right_order_ack`, `left_order_filled` / `right_order_filled`, `dual_exec_done`, `entry_done`, `execution_event_anomaly`, `order_failed` / `entry_failed`.
+## Что отфильтровано в `runtime_events.log`
 
-## Формат строки в session_trace.log
+По умолчанию туда не пишется шум:
 
-Первая строка после сброса — маркер схемы (`_schema`, `note`). Дальше одна строка = один JSON:
+- тики котировок
+- `rest_poll_*`
+- сырые `*_order_event`
+- дубликаты `*_sent`, `*_ack`, `*_fill`
+- health-события execution stream теперь пишутся, потому что они важны для отладки reconnect/auth
+
+## Формат `runtime_events.log`
+
+Первая строка после сброса — маркер схемы:
 
 ```json
-{"worker_id":"...","event_type":"entry_done","timestamp":...,"payload":{...}}
+{"_schema":"runtime_events_v1","note":"timestamp_ms UTC-ish; event_type + payload; no quote ticks; no raw exchange blobs"}
 ```
 
-В payload по умолчанию **нет** поля `raw` (ответ биржи) и пустых `null` — только факты для отчёта.
+Дальше одна строка = один JSON:
+
+```json
+{"worker_id":"...","event_type":"entry_done","timestamp":1234567890,"payload":{"cycle_id":1}}
+```

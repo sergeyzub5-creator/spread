@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 
@@ -29,12 +29,13 @@ _CAPSULE_WIDTHS = {
 }
 
 _STATUS_MAP = {
+    "STARTING": ("Запуск", "starting", "#fb923c", "#f97316"),
     "WAITING_ENTRY": ("Ожидание", "waiting", "#60a5fa", "#3b82f6"),
     "WAITING_EXIT": ("В позиции", "position", "#22c55e", "#16a34a"),
     "ENTERING": ("Вход...", "active", "#fbbf24", "#f59e0b"),
     "EXITING": ("Выход...", "active", "#fbbf24", "#f59e0b"),
     "REBALANCING": ("Балансировка", "warning", "#fb923c", "#f97316"),
-    "RESTORE_HEDGE": ("Хэдж", "warning", "#fb923c", "#f97316"),
+    "RESTORE_HEDGE": ("Хедж", "warning", "#fb923c", "#f97316"),
     "EMERGENCY_CLOSE": ("Аварийный", "danger", "#ef4444", "#dc2626"),
     "RECOVERY": ("Восстановление", "warning", "#fb923c", "#f97316"),
     "FAILED": ("Сбой", "danger", "#ef4444", "#dc2626"),
@@ -48,7 +49,7 @@ _STREAM_STATUS_OVERRIDE = {
 
 
 def _compact_usdt(raw: str) -> str:
-    """Format a USDT value into compact human-readable form: 1.5к, 12М, etc."""
+    """Format a USDT value into compact human-readable form: 1.5Ðº, 12Ðœ, etc."""
     try:
         val = Decimal(str(raw).replace(",", "").strip())
     except (InvalidOperation, ValueError):
@@ -165,7 +166,7 @@ class RuntimeCard(QFrame):
         root.addWidget(self._stop_btn)
 
         self.apply_theme()
-        self.update_status("WAITING_ENTRY", "UNKNOWN")
+        self.update_status("STARTING", "UNKNOWN")
 
     def _build_capsule(self, param_key: str, title: str, value: str) -> QFrame:
         capsule = QFrame()
@@ -240,7 +241,7 @@ class RuntimeCard(QFrame):
     def set_status(self, running: bool) -> None:
         """Legacy method for basic running/stopped status."""
         if running:
-            self.update_status("WAITING_ENTRY", "UNKNOWN")
+            self.update_status("STARTING", "UNKNOWN")
         else:
             self.update_status("STOPPED", "UNKNOWN")
 
@@ -251,8 +252,6 @@ class RuntimeCard(QFrame):
 
         if health in _STREAM_STATUS_OVERRIDE and activity not in {"STOPPED", "FAILED"}:
             text, state, fill, border = _STREAM_STATUS_OVERRIDE[health]
-        elif activity == "WAITING_ENTRY" and health not in {"HEALTHY"}:
-            text, state, fill, border = ("Запуск", "starting", "#fb923c", "#f97316")
         elif activity in _STATUS_MAP:
             text, state, fill, border = _STATUS_MAP[activity]
         else:
@@ -381,3 +380,4 @@ def _rgba(hex_color: str, alpha: float) -> str:
         h = "".join(c * 2 for c in h)
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return f"rgba({r}, {g}, {b}, {alpha:.2f})"
+
